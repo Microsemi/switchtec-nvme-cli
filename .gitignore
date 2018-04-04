@@ -7,6 +7,7 @@ a.out
 NVME-VERSION-FILE
 
 cscope.*
+tags
 
 /debian/files
 /debian/nvme-cli.debhelper.log
