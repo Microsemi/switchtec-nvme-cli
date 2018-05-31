@@ -147,6 +147,8 @@ int parse_and_open(int argc, char **argv, const char *desc,
 extern const char *devicename;
 
 int __id_ctrl(int argc, char **argv, struct command *cmd, struct plugin *plugin, void (*vs)(__u8 *vs, struct json_object *root));
-int	validate_output_format(char *format);
+int validate_output_format(char *format);
+int get_nvme_info(int fd, struct list_item *item, const char *node);
+int open_dev(const char *path);
 
 #endif /* _NVME_H */

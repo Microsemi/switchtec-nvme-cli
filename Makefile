@@ -34,15 +34,16 @@ NVME_DPKG_VERSION=1~`lsb_release -sc`
 OBJS := argconfig.o suffix.o parser.o nvme-print.o nvme-ioctl.o \
 	nvme-lightnvm.o fabrics.o json.o plugin.o intel-nvme.o \
 	lnvm-nvme.o memblaze-nvme.o wdc-nvme.o wdc-utils.o nvme-models.o \
-	huawei-nvme.o netapp-nvme.o  toshiba-nvme.o
+	huawei-nvme.o netapp-nvme.o  toshiba-nvme.o switchtec-nvme-device.o \
+	rc-nvme-device.o switchtec-nvme.o
 
 nvme: nvme.c nvme.h $(OBJS) NVME-VERSION-FILE
-	$(CC) $(CPPFLAGS) $(CFLAGS) nvme.c -o $(NVME) $(OBJS) $(LDFLAGS)
+	$(CC) $(CPPFLAGS) $(CFLAGS) nvme.c -o $(NVME) $(OBJS) $(LDFLAGS) -lswitchtec
 
-nvme.o: nvme.c nvme.h nvme-print.h nvme-ioctl.h argconfig.h suffix.h nvme-lightnvm.h fabrics.h
+nvme.o: nvme.c nvme.h nvme-device.h rc-nvme-device.h pax-nvme-device.h nvme-print.h nvme-ioctl.h argconfig.h suffix.h nvme-lightnvm.h fabrics.h
 	$(CC) $(CPPFLAGS) $(CFLAGS) -c $<
 
-%.o: %.c %.h nvme.h linux/nvme_ioctl.h nvme-ioctl.h nvme-print.h argconfig.h
+%.o: %.c %.h nvme.h linux/nvme_ioctl.h nvme-ioctl.h nvme-print.h argconfig.h nvme-device.h
 	$(CC) $(CPPFLAGS) $(CFLAGS) -c $<
 
 doc: $(NVME)
