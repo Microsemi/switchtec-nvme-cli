@@ -36,6 +36,7 @@
 #include <sys/types.h>
 
 #include <switchtec/switchtec.h>
+#include <switchtec/fabric.h>
 #include <switchtec/mrpc.h>
 
 #include "linux/nvme_ioctl.h"
@@ -112,15 +113,15 @@ static int scan_pax_dev_filter(const struct dirent *d)
 
 #define NVME_CLASS	0x010802
 #define CAP_PF		0x3
-static int pax_get_nvme_pf_functions(struct pax_nvme_device *pax, struct fabiov_db_dump_ep_port_attached_device_function *functions, int max_functions)
+static int pax_get_nvme_pf_functions(struct pax_nvme_device *pax, struct switchtec_gfms_db_ep_port_attached_device_function *functions, int max_functions)
 {
 	int i, j;
 	int index;
 	int ret;
 	int n;
-	struct fabiov_db_dump_pax_all pax_all;
-	struct fabiov_db_dump_ep_port *ep_port;
-	struct fabiov_db_dump_ep_port_attached_device_function *function;
+	struct switchtec_gfms_db_pax_all pax_all;
+	struct switchtec_gfms_db_ep_port *ep_port;
+	struct switchtec_gfms_db_ep_port_attached_device_function *function;
 
 	ret = switchtec_gfms_db_dump_pax_all(pax->dev, &pax_all);
 	if (ret) {
@@ -131,7 +132,7 @@ static int pax_get_nvme_pf_functions(struct pax_nvme_device *pax, struct fabiov_
 	index = 0;
 	for (i = 0; i < pax_all.ep_port_all.ep_port_count; i++) {
 		ep_port = &pax_all.ep_port_all.ep_ports[i];
-		if (ep_port->port_hdr.type == EP_ATTACHED_DEVICE_TYPE_EP) {
+		if (ep_port->port_hdr.type == SWITCHTEC_GFMS_DB_TYPE_EP) {
 			n = ep_port->ep_ep.ep_hdr.function_number;
 			for (j = 0; j < n; j++) {
 				function = &ep_port->ep_ep.functions[j];
@@ -161,7 +162,7 @@ static int switchtec_pax_list(int argc, char **argv, struct command *command,
 	struct dirent **pax_devices;
 	struct pax_nvme_device *pax;
 	__u32 ns_list[1024] = {0};
-	struct fabiov_db_dump_ep_port_attached_device_function functions[1024];
+	struct switchtec_gfms_db_ep_port_attached_device_function functions[1024];
 
 	const char *desc = "Retrieve basic information for the given Microsemi device";
 	struct config {

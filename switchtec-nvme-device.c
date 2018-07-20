@@ -29,23 +29,24 @@
 #include "switchtec-nvme-device.h"
 
 #include <switchtec/switchtec.h>
+#include <switchtec/fabric.h>
 #include <switchtec/mrpc.h>
 
-struct fabiov_device_manage_nvme_req
+struct switchtec_device_manage_nvme_req
 {
-	struct fabiov_device_manage_req_hdr hdr;
+	struct switchtec_device_manage_req_hdr hdr;
 	uint32_t nvme_sqe[16];
 	uint8_t nvme_data[MRPC_MAX_DATA_LEN -
-		sizeof(struct fabiov_device_manage_req_hdr) -
+		sizeof(struct switchtec_device_manage_req_hdr) -
 		(16 * 4)];
 };
 
-struct fabiov_device_manage_nvme_rsp
+struct switchtec_device_manage_nvme_rsp
 {
-	struct fabiov_device_manage_rsp_hdr hdr;
+	struct switchtec_device_manage_rsp_hdr hdr;
 	uint32_t nvme_cqe[4];
 	uint8_t nvme_data[MRPC_MAX_DATA_LEN -
-		sizeof(struct fabiov_device_manage_rsp_hdr) -
+		sizeof(struct switchtec_device_manage_rsp_hdr) -
 		(4 * 4)];
 };
 
@@ -54,8 +55,8 @@ int pax_nvme_submit_admin_passthru(int fd, struct nvme_passthru_cmd *cmd)
 	int ret;
 
 	struct pax_nvme_device *pax;
-	struct fabiov_device_manage_nvme_req req;
-	struct fabiov_device_manage_nvme_rsp rsp;
+	struct switchtec_device_manage_nvme_req req;
+	struct switchtec_device_manage_nvme_rsp rsp;
 	int data_len;
 	int status;
 	bool write = nvme_is_write((struct nvme_command *)cmd);
@@ -81,8 +82,8 @@ int pax_nvme_submit_admin_passthru(int fd, struct nvme_passthru_cmd *cmd)
 	req.hdr.expected_rsp_len = (sizeof(rsp.nvme_cqe) + sizeof(rsp.nvme_data))/4;
 
 	ret = switchtec_device_manage(pax->dev,
-				     (struct fabiov_device_manage_req *)&req,
-				     (struct fabiov_device_manage_rsp *)&rsp);
+				     (struct switchtec_device_manage_req *)&req,
+				     (struct switchtec_device_manage_rsp *)&rsp);
 
 #if 0
 	printf("req:\n");
