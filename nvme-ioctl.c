@@ -20,6 +20,12 @@
 #include <linux/types.h>
 
 #include "nvme-ioctl.h"
+#include "nvme-device.h"
+
+int is_blk(void)
+{
+	return global_device->ops->is_blk();
+}
 
 static int nvme_verify_chr(int fd)
 {
@@ -45,7 +51,7 @@ int nvme_subsystem_reset(int fd)
 	ret = nvme_verify_chr(fd);
 	if (ret)
 		return ret;
-	return ioctl(fd, NVME_IOCTL_SUBSYS_RESET);
+	return global_device->ops->nvme_subsystem_reset(fd);
 }
 
 int nvme_reset_controller(int fd)
@@ -55,7 +61,7 @@ int nvme_reset_controller(int fd)
 	ret = nvme_verify_chr(fd);
 	if (ret)
 		return ret;
-	return ioctl(fd, NVME_IOCTL_RESET);
+	return global_device->ops->nvme_reset_controller(fd);
 }
 
 int nvme_ns_rescan(int fd)
@@ -65,7 +71,7 @@ int nvme_ns_rescan(int fd)
 	ret = nvme_verify_chr(fd);
 	if (ret)
 		return ret;
-	return ioctl(fd, NVME_IOCTL_RESCAN);
+	return global_device->ops->nvme_ns_rescan(fd);
 }
 
 int nvme_get_nsid(int fd)
@@ -76,27 +82,27 @@ int nvme_get_nsid(int fd)
 	if (err < 0)
 		return err;
 
-	if (!S_ISBLK(nvme_stat.st_mode)) {
+	if (!global_device->ops->is_blk()) {
 		fprintf(stderr,
 			"Error: requesting namespace-id from non-block device\n");
 		return -ENOTBLK;
 	}
-	return ioctl(fd, NVME_IOCTL_ID);
+	return global_device->ops->nvme_get_nsid(fd);
 }
 
 int nvme_submit_passthru(int fd, int ioctl_cmd, struct nvme_passthru_cmd *cmd)
 {
-	return ioctl(fd, ioctl_cmd, cmd);
+	return global_device->ops->nvme_submit_passthru(fd, ioctl_cmd, cmd);
 }
 
-static int nvme_submit_admin_passthru(int fd, struct nvme_passthru_cmd *cmd)
+int nvme_submit_admin_passthru(int fd, struct nvme_passthru_cmd *cmd)
 {
-	return ioctl(fd, NVME_IOCTL_ADMIN_CMD, cmd);
+	return global_device->ops->nvme_submit_admin_passthru(fd, cmd);
 }
 
 static int nvme_submit_io_passthru(int fd, struct nvme_passthru_cmd *cmd)
 {
-	return ioctl(fd, NVME_IOCTL_IO_CMD, cmd);
+	return global_device->ops->nvme_submit_io_passthru(fd, cmd);
 }
 
 int nvme_passthru(int fd, int ioctl_cmd, __u8 opcode, __u8 flags, __u16 rsvd,
@@ -151,7 +157,7 @@ int nvme_io(int fd, __u8 opcode, __u64 slba, __u16 nblocks, __u16 control,
 		.appmask	= appmask,
 		.apptag		= apptag,
 	};
-	return ioctl(fd, NVME_IOCTL_SUBMIT_IO, &io);
+	return global_device->ops->nvme_io(fd, &io);
 }
 
 int nvme_read(int fd, __u64 slba, __u16 nblocks, __u16 control, __u32 dsmgmt,

@@ -45,9 +45,15 @@
 #include <sys/stat.h>
 #include <sys/time.h>
 
+#include <switchtec/switchtec.h>
+#include <switchtec/mrpc.h>
+
 #include "nvme-print.h"
 #include "nvme-ioctl.h"
 #include "nvme-lightnvm.h"
+#include "switchtec-nvme-device.h"
+#include "rc-nvme-device.h"
+#include "nvme-device.h"
 #include "plugin.h"
 
 #include "argconfig.h"
@@ -58,7 +64,7 @@
 #define min(x, y) ((x) > (y) ? (y) : (x))
 #define max(x, y) ((x) > (y) ? (x) : (y))
 
-static struct stat nvme_stat;
+struct stat nvme_stat;
 const char *devicename;
 
 static const char nvme_version_string[] = NVME_VERSION;
@@ -92,27 +98,99 @@ static unsigned long long elapsed_utime(struct timeval start_time,
 	return ret;
 }
 
-static int open_dev(const char *dev)
+struct nvme_device *global_device = NULL;
+
+int open_dev(const char *path)
 {
 	int err, fd;
+	char device_str[64];
+	char pdfid_str[64];
+	uint16_t pdfid;
+	uint32_t ns_id;
+	struct pax_nvme_device *pax;
+	struct rc_nvme_device *rc;
+	int n;
 
-	devicename = basename(dev);
-	err = open(dev, O_RDONLY);
-	if (err < 0)
-		goto perror;
-	fd = err;
+	devicename = basename(path);
 
-	err = fstat(fd, &nvme_stat);
-	if (err < 0)
-		goto perror;
-	if (!S_ISCHR(nvme_stat.st_mode) && !S_ISBLK(nvme_stat.st_mode)) {
-		fprintf(stderr, "%s is not a block or character device\n", dev);
-		return -ENODEV;
+	if (sscanf(path, "%2049[^@]@%s", pdfid_str, device_str) == 2) {
+		n = sscanf(pdfid_str, "%hxn%d", &pdfid, &ns_id);
+		if (!n) {
+			return -1;
+		}
+		pax = malloc(sizeof(struct pax_nvme_device));
+		pax->pdfid = pdfid;
+		pax->device.ops = &pax_ops;
+		if (n == 2) {
+			pax->is_blk = 1;
+			pax->ns_id = ns_id;
+		}
+
+		pax->dev = switchtec_open(device_str);
+		if (!pax->dev) {
+			switchtec_perror(device_str);
+			free(pax);
+			printf("return here\n");
+			global_device  = NULL;
+			return -ENODEV;
+		}
+
+		global_device = &pax->device;
+		global_device->type = NVME_DEVICE_TYPE_PAX;
+
+		fd = 0;
+		err = 0;
+
+		return fd;
+	} else if (strchr(path, '/') || strchr(path, '\\')) {
+		err = open(path, O_RDONLY);
+		if (err < 0)
+			goto perror;
+		fd = err;
+
+		err = fstat(fd, &nvme_stat);
+		if (err < 0)
+			goto perror;
+		if (!S_ISCHR(nvme_stat.st_mode) && !S_ISBLK(nvme_stat.st_mode)) {
+			fprintf(stderr, "%s is not a block or character device\n", path);
+			return -ENODEV;
+		}
+
+		rc = malloc(sizeof(struct rc_nvme_device));
+		rc->device.ops = &rc_ops;
+		global_device = &rc->device;
+		global_device->type = NVME_DEVICE_TYPE_RC;
+
+		return fd;
 	}
-	return fd;
+	err = -1;
+
  perror:
-	perror(dev);
+	perror(path);
 	return err;
+}
+
+int close_dev(struct nvme_device *device)
+{
+	if (!device)
+		return 0;
+
+	if (device->type == NVME_DEVICE_TYPE_PAX) {
+		struct pax_nvme_device *pax;
+		pax = to_pax_nvme_device(device);
+		switchtec_close(pax->dev);
+		free(pax);
+
+		return 0;
+	} else if (device->type == NVME_DEVICE_TYPE_RC) {
+		struct rc_nvme_device *rc;
+		rc = to_rc_nvme_device(device);
+		free(rc);
+
+		return 0;
+	}
+
+	return -1;
 }
 
 static int check_arg_dev(int argc, char **argv)
@@ -813,7 +891,7 @@ static int list_ns(int argc, char **argv, struct command *cmd, struct plugin *pl
 	const char *namespace_id = "namespace number returned list should to start after";
 	const char *all = "show all namespaces in the subsystem, whether attached or inactive";
 	int err, i, fd;
-	__u32 ns_list[1024];
+	__u32 ns_list[1024] = {0};
 
 	struct config {
 		__u32 namespace_id;
@@ -1390,7 +1468,7 @@ free_subsys:
 	return ret;
 }
 
-static int get_nvme_info(int fd, struct list_item *item, const char *node)
+int get_nvme_info(int fd, struct list_item *item, const char *node)
 {
 	int err;
 
@@ -1405,8 +1483,7 @@ static int get_nvme_info(int fd, struct list_item *item, const char *node)
 	if (err)
 		return err;
 	strcpy(item->node, node);
-	item->block = S_ISBLK(nvme_stat.st_mode);
-
+	item->block = is_blk();
 	return 0;
 }
 
@@ -1479,7 +1556,7 @@ static int list(int argc, char **argv, struct command *cmd, struct plugin *plugi
 
 	for (i = 0; i < n; i++) {
 		snprintf(path, sizeof(path), "%s%s", dev, devices[i]->d_name);
-		fd = open(path, O_RDONLY);
+		fd = open_dev(path);
 		if (fd < 0) {
 			fprintf(stderr, "can not open %s: %s\n", path,
 					strerror(errno));
@@ -1719,13 +1796,14 @@ static int id_ns(int argc, char **argv, struct command *cmd, struct plugin *plug
 		err = fmt;
 		goto close_fd;
 	}
+
 	if (cfg.raw_binary)
 		fmt = BINARY;
 	if (cfg.vendor_specific)
 		flags |= VS;
 	if (cfg.human_readable)
 		flags |= HUMAN;
-	if (!cfg.namespace_id && S_ISBLK(nvme_stat.st_mode)) {
+	if (!cfg.namespace_id && is_blk()) {
 		cfg.namespace_id = get_nsid(fd);
 		if (cfg.namespace_id <= 0)
 			return EINVAL;
@@ -4156,7 +4234,7 @@ static int connect_all_cmd(int argc, char **argv, struct command *command, struc
 static int connect_cmd(int argc, char **argv, struct command *command, struct plugin *plugin)
 {
 	const char *desc = "Connect to NVMeoF subsystem";
-	return connect(desc, argc, argv);
+	return _connect(desc, argc, argv);
 }
 
 static int disconnect_cmd(int argc, char **argv, struct command *command, struct plugin *plugin)
@@ -4187,6 +4265,8 @@ int main(int argc, char **argv)
 	ret = handle_plugin(argc - 1, &argv[1], nvme.extensions);
 	if (ret == -ENOTTY)
 		general_help(&builtin);
+
+	close_dev(global_device);
 
 	return ret;
 }

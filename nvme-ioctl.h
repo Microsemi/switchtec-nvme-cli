@@ -135,4 +135,6 @@ int nvme_set_property(int fd, int offset, int value);
 int nvme_sanitize(int fd, __u8 sanact, __u8 ause, __u8 owpass, __u8 oipbp,
 		  __u8 no_dealloc, __u32 ovrpat);
 
+int is_blk(void);
+
 #endif				/* _NVME_LIB_H */
