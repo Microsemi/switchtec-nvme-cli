@@ -78,27 +78,11 @@ int pax_nvme_submit_admin_passthru(int fd, struct nvme_passthru_cmd *cmd)
 
 	memcpy(req.nvme_data, (void *)cmd->addr, data_len);
 
-//	req.hdr.req_len = htole16(((data_len + 3) & ~3) / 4 + sizeof(req.nvme_sqe));
 	req.hdr.expected_rsp_len = (sizeof(rsp.nvme_cqe) + sizeof(rsp.nvme_data))/4;
 
 	ret = switchtec_device_manage(pax->dev,
 				     (struct switchtec_device_manage_req *)&req,
 				     (struct switchtec_device_manage_rsp *)&rsp);
-
-#if 0
-	printf("req:\n");
-	for (int i = 0; i < data_len/4; i++) {
-		printf("0x%08x ", *((int *)&req.nvme_sqe + i));
-	}
-	printf("\n");
-	printf("rsp:\n");
-	for (int i = 0; i < rsp.hdr.rsp_len; i++) {
-		printf("0x%08x ", *((int *)&rsp.nvme_cqe + i));
-		if (i % 16 == 15)
-			printf("\n");
-	}
-	printf("\n");
-#endif
 
 	if (ret) {
 		switchtec_perror("device_manage_cmd");
