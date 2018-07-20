@@ -113,7 +113,9 @@ static int scan_pax_dev_filter(const struct dirent *d)
 
 #define NVME_CLASS	0x010802
 #define CAP_PF		0x3
-static int pax_get_nvme_pf_functions(struct pax_nvme_device *pax, struct switchtec_gfms_db_ep_port_attached_device_function *functions, int max_functions)
+static int pax_get_nvme_pf_functions(struct pax_nvme_device *pax,
+				     struct switchtec_gfms_db_ep_port_attached_device_function *functions,
+				     int max_functions)
 {
 	int i, j;
 	int index;
@@ -149,7 +151,7 @@ static int pax_get_nvme_pf_functions(struct pax_nvme_device *pax, struct switcht
 }
 
 static int switchtec_pax_list(int argc, char **argv, struct command *command,
-		struct plugin *plugin)
+			      struct plugin *plugin)
 {
 	char path[264];
 	char node[300];
@@ -190,9 +192,9 @@ static int switchtec_pax_list(int argc, char **argv, struct command *command,
 	if (fmt != JSON && fmt != NORMAL)
 		return -EINVAL;
 
-	if (cfg.moe_service) {
+	if (cfg.moe_service)
 		n = 1;
-	} else {
+	else {
 		n = scandir(dev, &pax_devices, scan_pax_dev_filter, alphasort);
 		if (n < 0) {
 			fprintf(stderr, "no NVMe device(s) detected.\n");
