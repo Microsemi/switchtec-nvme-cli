@@ -33,7 +33,7 @@ struct rc_nvme_device {
 
 #define to_rc_nvme_device(d)  \
 	((struct rc_nvme_device*) \
-	 ((char *)d - offsetof(struct rc_nvme_device, device)))
+	((char *)d - offsetof(struct rc_nvme_device, device)))
 
 extern struct nvme_device_ops rc_ops;
 
