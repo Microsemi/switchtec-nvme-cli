@@ -2,7 +2,7 @@ CFLAGS ?= -O2 -g -Wall -Werror
 CFLAGS += -std=gnu99
 CPPFLAGS += -D_GNU_SOURCE -D__CHECK_ENDIAN__
 LIBUUID = $(shell $(LD) -o /dev/null -luuid >/dev/null 2>&1; echo $$?)
-NVME = nvme
+NVME = switchtec-nvme
 INSTALL ?= install
 DESTDIR =
 PREFIX ?= /usr/local
@@ -37,7 +37,7 @@ OBJS := argconfig.o suffix.o parser.o nvme-print.o nvme-ioctl.o \
 	huawei-nvme.o netapp-nvme.o  toshiba-nvme.o switchtec-nvme-device.o \
 	rc-nvme-device.o switchtec-nvme.o
 
-nvme: nvme.c nvme.h $(OBJS) NVME-VERSION-FILE
+$(NVME): nvme.c nvme.h $(OBJS) NVME-VERSION-FILE
 	$(CC) $(CPPFLAGS) $(CFLAGS) nvme.c -o $(NVME) $(OBJS) $(LDFLAGS) -lswitchtec
 
 nvme.o: nvme.c nvme.h nvme-device.h rc-nvme-device.h pax-nvme-device.h nvme-print.h nvme-ioctl.h argconfig.h suffix.h nvme-lightnvm.h fabrics.h
