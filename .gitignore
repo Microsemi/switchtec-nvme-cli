@@ -1,4 +1,4 @@
-nvme
+switchtec-nvme
 *.xml
 a.out
 *.o
