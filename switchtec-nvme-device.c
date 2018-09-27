@@ -45,9 +45,7 @@ struct switchtec_device_manage_nvme_rsp
 {
 	struct switchtec_device_manage_rsp_hdr hdr;
 	uint32_t nvme_cqe[4];
-	uint8_t nvme_data[MRPC_MAX_DATA_LEN -
-		sizeof(struct switchtec_device_manage_rsp_hdr) -
-		(4 * 4)];
+	uint8_t nvme_data[SWITCHTEC_DEVICE_MANAGE_MAX_RESP - (4 * 4)];
 };
 
 int pax_nvme_submit_admin_passthru(int fd, struct nvme_passthru_cmd *cmd)
