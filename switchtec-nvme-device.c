@@ -76,7 +76,7 @@ int pax_nvme_submit_admin_passthru(int fd, struct nvme_passthru_cmd *cmd)
 
 	memcpy(req.nvme_data, (void *)cmd->addr, data_len);
 
-	req.hdr.expected_rsp_len = (sizeof(rsp.nvme_cqe) + sizeof(rsp.nvme_data))/4;
+	req.hdr.expected_rsp_len = (sizeof(rsp.nvme_cqe) + sizeof(rsp.nvme_data));
 
 	ret = switchtec_device_manage(pax->dev,
 				     (struct switchtec_device_manage_req *)&req,
@@ -93,7 +93,7 @@ int pax_nvme_submit_admin_passthru(int fd, struct nvme_passthru_cmd *cmd)
 		if (!write) {
 			memcpy((uint64_t *)cmd->addr,
 				rsp.nvme_data,
-				(rsp.hdr.rsp_len - 4) * 4);
+				rsp.hdr.rsp_len - 4 * 4);
 		}
 	}
 
