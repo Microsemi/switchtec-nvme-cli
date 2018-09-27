@@ -67,7 +67,7 @@ install-man:
 
 install-bin: default
 	$(INSTALL) -d $(DESTDIR)$(SBINDIR)
-	$(INSTALL) -m 755 nvme $(DESTDIR)$(SBINDIR)
+	$(INSTALL) -m 755 $(NVME) $(DESTDIR)$(SBINDIR)
 
 install-bash-completion:
 	$(INSTALL) -d $(DESTDIR)$(PREFIX)/share/bash_completion.d
