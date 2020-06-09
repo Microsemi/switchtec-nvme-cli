@@ -15,11 +15,12 @@ SYNOPSIS
 		      [--raw-binary | -b]
 		      [--lpo=<offset> | -o <offset>]
 		      [--lsp=<field> | -s <field>]
+		      [--rae | -r]
 
 DESCRIPTION
 -----------
 Retrieves an arbitrary NVMe log page from an NVMe device and provides
-the retuned structure.
+the returned structure.
 
 The <device> parameter is mandatory and may be either the NVMe character
 device (ex: /dev/nvme0), or a namespace block device (ex: /dev/nvme0n1).
@@ -66,6 +67,10 @@ OPTIONS
 -s <field>::
 --lsp=<field>::
 	The log specified field of LID.
+
+-r::
+--rae::
+	Retain an Asynchronous Event.
 
 EXAMPLES
 --------

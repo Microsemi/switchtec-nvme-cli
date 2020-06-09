@@ -2,12 +2,12 @@
 .\"     Title: nvme-list
 .\"    Author: [FIXME: author] [see http://www.docbook.org/tdg5/en/html/author]
 .\" Generator: DocBook XSL Stylesheets vsnapshot <http://docbook.sf.net/>
-.\"      Date: 03/01/2018
+.\"      Date: 04/24/2020
 .\"    Manual: NVMe Manual
 .\"    Source: NVMe
 .\"  Language: English
 .\"
-.TH "NVME\-LIST" "1" "03/01/2018" "NVMe" "NVMe Manual"
+.TH "NVME\-LIST" "1" "04/24/2020" "NVMe" "NVMe Manual"
 .\" -----------------------------------------------------------------
 .\" * Define some portability stuff
 .\" -----------------------------------------------------------------
@@ -46,6 +46,14 @@ Set the reporting format to
 or
 \fIjson\fR\&. Only one output format can be used at a time\&.
 .RE
+.PP
+\-v, \-\-verbose
+.RS 4
+Increase the information in the output, showing nvme subsystems, controllers and namespaces separately and how they\(cqre realted to each other\&.
+.RE
+.SH "ENVIRONMENT"
+.sp
+PCI_IDS_PATH \- Full path of pci\&.ids file in case nvme could not find it in common locations\&.
 .SH "EXAMPLES"
 .sp
 No examples yet\&.

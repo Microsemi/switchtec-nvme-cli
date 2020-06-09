@@ -18,6 +18,23 @@ API_DOCS =
 SP_ARTICLES += $(API_DOCS)
 SP_ARTICLES += $(TECH_DOCS)
 
+ifneq ($(findstring $(MAKEFLAGS),s),s)
+ifndef V
+	QUIET_ASCIIDOC  = @echo '   ' ASCIIDOC $@;
+	QUIET_XMLTO     = @echo '   ' XMLTO $@;
+	QUIET_DB2TEXI   = @echo '   ' DB2TEXI $@;
+	QUIET_MAKEINFO  = @echo '   ' MAKEINFO $@;
+	QUIET_DBLATEX   = @echo '   ' DBLATEX $@;
+	QUIET_XSLTPROC  = @echo '   ' XSLTPROC $@;
+	QUIET_GEN       = @echo '   ' GEN $@;
+	QUIET_LINT      = @echo '   ' LINT $@;
+	QUIET_STDERR    = 2> /dev/null
+	QUIET_SUBDIR0   = +@subdir=
+	QUIET_SUBDIR1   = ;$(NO_SUBDIR) echo '   ' SUBDIR $$subdir; \
+			$(MAKE) $(PRINT_DIR) -C $$subdir
+	export V
+endif
+endif
 
 DOC_MAN1 = $(patsubst %.txt,%.1,$(MAN1_TXT))
 
@@ -28,13 +45,26 @@ ASCIIDOC_COMMON = $(ASCIIDOC) $(ASCIIDOC_EXTRA)
 TXT_TO_XML = $(ASCIIDOC_COMMON) -b $(ASCIIDOC_DOCBOOK)
 MANPAGE_XSL = manpage-normal.xsl
 XMLTO = xmlto
-XMLTO_EXTRA =
+XMLTO_EXTRA = --skip-validation
 INSTALL ?= install
 RM ?= rm -f
 MAN_REPO = ../../nvme-manpages
 
 ASCIIDOC_HTML = xhtml11
 ASCIIDOC_CONF = -f asciidoc.conf
+
+ifdef USE_ASCIIDOCTOR
+ASCIIDOC = asciidoctor
+ASCIIDOC_CONF =
+ASCIIDOC_HTML = xhtml5
+ASCIIDOC_DOCBOOK = docbook5
+ASCIIDOC_EXTRA += -acompat-mode
+ASCIIDOC_EXTRA += -I. -rasciidoctor-extensions
+ASCIIDOC_EXTRA += -alitdd='&\#x2d;&\#x2d;'
+ASCIIDOC_EXTRA += -amansource='NVMe'
+ASCIIDOC_EXTRA += -amanmanual='NVMe Manual'
+endif
+
 ASCIIDOC_COMMON = $(ASCIIDOC) $(ASCIIDOC_EXTRA) $(ASCIIDOC_CONF)
 TXT_TO_HTML = $(ASCIIDOC_COMMON) -b $(ASCIIDOC_HTML)
 
