@@ -10,7 +10,7 @@ Unlike some of the other SR-IOV devices such as NICs, the NVMe drives need to be
 
 These configurations are done through Fabric Manager using MRPC commands. MRPC interface is a way for a host to send configuration commands to the Switchtec firmware. Switchtec Gen4 PAX provides a special MRPC command to forward NVMe admin commands to the NVMe drives in the PAX fabric. 
 
-Switchtec-nvme-cli is responsible for creating the NVMe admin commands and delivering them to NVMe drives in the PAX fabric, using the special MRPC command. The special MRPC commands can be sent through one of these two channels: the inband PCIe channel, or the Ethernet channel.
+Switchtec-nvme-cli is responsible for creating the NVMe admin commands and delivering them to NVMe drives in the PAX fabric, using the special MRPC command. The special MRPC commands can be sent through one of these two channels: the inband PCIe channel, or the Ethernet channel. Switchtec-nvme-cli is currently based on v1.11.1 of the [nvme-cli][0].
 
 Refer to Switchtec PAX device specification for further information on Switchtec PAX, including MRPC, Fabric Manager and other terminologies used in this document.
 
