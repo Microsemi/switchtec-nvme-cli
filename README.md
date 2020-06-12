@@ -1,21 +1,21 @@
 # Switchtec-nvme-cli
-This project is a fork of [nvme-cli][0] project with additional support for using NVMe drives in the Switchtec Gen4 PAX fabric.
+This project is a fork of the [nvme-cli][0] project with additional support for using NVMe drives in the Switchtec Gen4 PAX fabric.
 
 ## Background
-Switchtec Gen4 PAX is a variant of Microsemi's Switchtec PCIe switch product which enables sharing SR-IOV devices among multiple hosts. Common SR-IOV devices include NICs, HBAs and IB cards, etc. With the support of Switchtec Gen4 PAX switch and this utility, an SR-IOV capable NVMe drive can be managed and configured by a host and then shared among multiple hosts.
+Switchtec Gen4 PAX is a variant of Microsemi's Switchtec PCIe switch product which enables sharing SR-IOV devices among multiple hosts. Common SR-IOV devices include NICs, HBAs, IB cards, etc. With the support of a Switchtec Gen4 PAX switch and this utility, an SR-IOV capable NVMe drive can be managed and configured by a host and then shared among multiple hosts.
 
-By default, an NVMe drive in the PAX fabric cannot be enumerated by the host. Using the bind operation provided by the Switchtec Gen4 PAX switch, such VF can be bound to and enumerated by the host.
+By default, an NVMe drive in the PAX fabric cannot be enumerated by the host. Using the bind operation provided by the Switchtec Gen4 PAX switch, such a VF can be bound to and enumerated by the host.
 
-Unlike some of the other SR-IOV devices such as NICs, the NVMe drives need to be properly configured before they can be used. Generally, the configurations include creating an namespace and attaching the namespace to a specific VF (NVMe secondary controller). 
+Unlike some other SR-IOV devices such as NICs, NVMe drives need to be properly configured before they can be used. Generally, configuration includes creating an namespace and attaching the namespace to a specific VF (NVMe secondary controller). 
 
-These configurations are done through Fabric Manager using MRPC commands. MRPC interface is a way for a host to send configuration commands to the Switchtec firmware. Switchtec Gen4 PAX provides a special MRPC command to forward NVMe admin commands to the NVMe drives in the PAX fabric. 
+The configuration is done through Fabric Manager using MRPC commands. The MRPC interface is a way for a host to send configuration commands to the Switchtec firmware. Switchtec Gen4 PAX provides a special MRPC command to forward NVMe admin commands to the NVMe drives in the PAX fabric. 
 
 Switchtec-nvme-cli is responsible for creating the NVMe admin commands and delivering them to NVMe drives in the PAX fabric, using the special MRPC command. The special MRPC commands can be sent through one of these two channels: the inband PCIe channel, or the Ethernet channel. Switchtec-nvme-cli is currently based on v1.11.1 of the [nvme-cli][0].
 
-Refer to Switchtec PAX device specification for further information on Switchtec PAX, including MRPC, Fabric Manager and other terminologies used in this document.
+Refer to the Switchtec PAX device specification for further information on Switchtec PAX, including MRPC, Fabric Manager and other terminologies used in this document.
 
 ## Features
-Swichtec-nvme-cli supports all features of nvme-cli for drives connected directly to host.
+Swichtec-nvme-cli supports all features of nvme-cli for drives connected directly to the host.
 
 Swichtec-nvme-cli supports the following operations for NVMe drives behind PAX:
 - Listing all NVMe devices and namespaces
@@ -23,11 +23,11 @@ Swichtec-nvme-cli supports the following operations for NVMe drives behind PAX:
 - Deleting a namespace
 - Attaching a namespace to requested controller(s)
 - Deleting a namespace from the controller
-- Sending NVMe Identify Controller command
-- Sending NVMe Identify Namespace command, displaying structure
-- Sending NVMe Identify List command, displaying structure
+- Sending the NVMe Identify Controller command
+- Sending the NVMe Identify Namespace command, displaying structure
+- Sending the NVMe Identify List command, displaying structure
 
-## Build and Installation
+## Building and Installation
 Switchtec-nvme-cli depends on the [switchtec-user][1] library and [switchtec-kernel][2] driver, among others. Please build and install the switchtec-user library and switchtec-kernel driver before building switchtec-nvme-cli.
 
 To build and install this utility, simply run the following commands:
@@ -137,7 +137,7 @@ Node                       SN                   Model                           
 0x3300n4@10.188.117.80:0   SERIALNUMBER         VENDOR MODEL                             4           2.15  GB /   2.15  GB    512   B +  0 B   REVISION
 0x3300n5@10.188.117.80:0   SERIALNUMBER         VENDOR MODEL                             5           2.15  GB /   2.15  GB    512   B +  0 B   REVISION
 ```
-2. List controllers of a NVMe drive
+2. List controllers of an NVMe drive
 ```
 #sudo ./switchtec-nvme list-ctrl 0x3300@10.188.117.80:0
 [   0]:0x1
@@ -157,7 +157,7 @@ Node                       SN                   Model                           
 [  14]:0xf
 [  15]:0x21
 ```
-3. List namespaces of a NVMe drive
+3. List namespaces of an NVMe drive
 ```
 #sudo ./switchtec-nvme list-ns 0x3300@10.188.117.80:0
 [   0]:0x1
