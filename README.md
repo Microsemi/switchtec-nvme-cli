@@ -28,7 +28,12 @@ Swichtec-nvme-cli supports the following operations for NVMe drives behind PAX:
 - Sending the NVMe Identify List command, displaying structure
 
 ## Building and Installation
-Switchtec-nvme-cli depends on the [switchtec-user][1] library and [switchtec-kernel][2] driver, among others. Please build and install the switchtec-user library and switchtec-kernel driver before building switchtec-nvme-cli.
+Switchtec-nvme-cli has the following dependencies:
+* libssl-dev
+* [switchtec-user][1] library
+* [switchtec-kernel][2] driver
+
+Please build and install the switchtec-user library and switchtec-kernel driver before building this utility.
 
 To build and install this utility, simply run the following commands:
 ```
