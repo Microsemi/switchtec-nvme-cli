@@ -38,7 +38,7 @@ ifeq ($(HAVE_SYSTEMD),0)
 	override CFLAGS += -DHAVE_SYSTEMD
 endif
 
-LDFLAGS += -lswitchtec 
+LDFLAGS += -lswitchtec -lcrypto
 
 RPMBUILD = rpmbuild
 TAR = tar
