@@ -3,7 +3,7 @@
 <html xmlns="http://www.w3.org/1999/xhtml" xml:lang="en">
 <head>
 <meta http-equiv="Content-Type" content="application/xhtml+xml; charset=UTF-8" />
-<meta name="generator" content="AsciiDoc 8.6.9" />
+<meta name="generator" content="AsciiDoc 8.6.8" />
 <title>nvme-admin-passthru(1)</title>
 <style type="text/css">
 /* Shared CSS for AsciiDoc xhtml11 and html5 backends */
@@ -94,9 +94,7 @@ ul > li > * { color: black; }
   padding: 0;
   margin: 0;
 }
-pre {
-  white-space: pre-wrap;
-}
+
 
 #author {
   color: #527bbd;
@@ -225,7 +223,7 @@ div.exampleblock > div.content {
 }
 
 div.imageblock div.content { padding-left: 0; }
-span.image img { border-style: none; vertical-align: text-bottom; }
+span.image img { border-style: none; }
 a.image:visited { color: white; }
 
 dl {
@@ -755,7 +753,7 @@ nvme-admin-passthru(1) Manual Page
                 [--cdw13=&lt;cdw13&gt;] [--cdw14=&lt;cdw14&gt;] [--cdw15=&lt;cdw15&gt;]
                 [--data-len=&lt;data-len&gt; | -l &lt;data-len&gt;]
                 [--metadata-len=&lt;len&gt; | -m &lt;len&gt;]
-                [--input-file=&lt;file&gt; | -f &lt;file&gt;]
+                [--input-file=&lt;file&gt; | -i &lt;file&gt;]
                 [--read | -r ] [--write | -w]
                 [--timeout=&lt;to&gt; | -t &lt;to&gt;]
                 [--show-command | -s]
@@ -912,7 +910,7 @@ printed to stdout for another program to parse.</p></div>
 <dd>
 <p>
         Do not actually send the command. If want to use --dry-run option,
-        --show-cmd option <em>must</em> be set. Otherwise --dry-run optionn will be
+        --show-cmd option <em>must</em> be set. Otherwise --dry-run option will be
         <em>ignored</em>.
 </p>
 </dd>
@@ -984,8 +982,7 @@ Or if you want to save that structure to a file:
 <div id="footnotes"><hr /></div>
 <div id="footer">
 <div id="footer-text">
-Last updated
- 2018-01-30 19:28:39 KST
+Last updated 2019-09-06 10:35:44 MDT
 </div>
 </div>
 </body>

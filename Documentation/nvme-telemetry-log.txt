@@ -9,12 +9,12 @@ SYNOPSIS
 --------
 [verse]
 'nvme telemetry-log' <device> [--output-file=<file> | -o <file>]
-		      [--host-generate=<gen> | -h <gen>]
+		      [--host-generate=<gen> | -g <gen>]
 
 DESCRIPTION
 -----------
 Retrieves an Telemetry Host-Initiated log page from an NVMe device and provides
-the retuned structure.
+the returned structure.
 
 The <device> parameter is mandatory and may be either the NVMe character
 device (ex: /dev/nvme0), or a namespace block device (ex: /dev/nvme0n1).
@@ -28,12 +28,18 @@ OPTIONS
 --output-file=<file>::
 	File name to which raw binary data will be saved to.
 
--h <gen>::
+-g <gen>::
 --host-generate=<gen>::
 	If set to 1, controller shall capture the Telemetry Host-Initiated data
 	representing the internal state of the controller at the time the
 	associated Get Log Page command is processed.
 	If cleated to 0, controller shall _not_ update this data.
+
+-d <da>::
+--data-area=<da>::
+	Retrieves the specific data area requested. Valid inputs are 1,2,3. If
+	this option is not specified, the default value is 3, since that will
+	always give the user all three data areas.
 
 EXAMPLES
 --------

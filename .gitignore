@@ -13,3 +13,7 @@ tags
 /debian/nvme-cli.debhelper.log
 /debian/nvme-cli.substvars
 /debian/nvme-cli
+
+tests/__pycache__
+tests/nvmetests
+tests/*.pyc

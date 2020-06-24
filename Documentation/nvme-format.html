@@ -1,9 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.1//EN"
     "http://www.w3.org/TR/xhtml11/DTD/xhtml11.dtd">
 <html xmlns="http://www.w3.org/1999/xhtml" xml:lang="en">
 <head>
 <meta http-equiv="Content-Type" content="application/xhtml+xml; charset=UTF-8" />
-<meta name="generator" content="AsciiDoc 8.6.9" />
+<meta name="generator" content="AsciiDoc 8.6.10" />
 <title>nvme-format(1)</title>
 <style type="text/css">
 /* Shared CSS for AsciiDoc xhtml11 and html5 backends */
@@ -750,11 +751,13 @@ nvme-format(1) Manual Page
 <div class="verseblock">
 <pre class="content"><em>nvme format</em> &lt;device&gt; [--namespace-id=&lt;nsid&gt; | -n &lt;nsid&gt;]
                     [--lbaf=&lt;lbaf&gt; | -l &lt;lbaf&gt;]
+                    [--block-size=&lt;block size | -b &lt;block size&gt;]
                     [--ses=&lt;ses&gt; | -s &lt;ses&gt;]
                     [--pil=&lt;pil&gt; | -p &lt;pil&gt;]
                     [--pi=&lt;pi&gt; | -i &lt;pi&gt;]
                     [--ms=&lt;ms&gt; | -m &lt;ms&gt;]
                     [--reset | -r ]
+                    [--force | -f ]
                     [--timeout=&lt;timeout&gt; | -t &lt;timeout&gt; ]</pre>
 <div class="attribution">
 </div></div>
@@ -767,16 +770,25 @@ nvme-format(1) Manual Page
 and provides the results.</p></div>
 <div class="paragraph"><p>The &lt;device&gt; parameter is mandatory and may be either the NVMe character
 device (ex: /dev/nvme0), or a namespace block device (ex: /dev/nvme0n1).
-If the character device is given, the namespace identifier will default
-to 0xffffffff to send the format to all namespace, but can be overridden
-to any namespace with the <em>namespace-id</em> option. If the block device
-is given, the namespace identifier will default to the namespace id of
-the block device given, but can be overridden with the same option.</p></div>
+If the character device is given, and the controller does not support
+formatting of particular namespaces (ID_CTRL.FNA bit 0 enabled), then all
+namespaces will be formatted. If FNA is disabled, then the namespace
+identifier must be specified with the <em>namespace-id</em> option; specify a
+value of 0xffffffff to send the format to all namespaces. If the block
+device is given, the namespace identifier will default to the namespace
+ID of the block device given, but can be overridden with the same option.</p></div>
+<div class="paragraph"><p>Note, the numeric suffix on the character device, for example the <em>0</em> in
+/dev/nvme0, does NOT indicate this device handle is the parent controller
+of any namespaces with the same suffix. The namespace handle&#8217;s numeral
+may be coming from the subsystem identifier, which is independent of the
+controller&#8217;s identifier. Do not assume any particular device relationship
+based on their names. If you do, you may irrevocably erase data on an
+unintended device.</p></div>
 <div class="paragraph"><p>On success, the program will automatically issue BLKRRPART ioctl to
-force rescanning the namespaces. If the driver is recent enough, this
-will automatically update the physical block size. If it is not recent
-enough, you will need to remove and rescan your device some other way
-for the new block size to be visible.</p></div>
+force rescanning the namespaces. If the driver is recent enough, this will
+automatically update the physical block size. If it is not recent enough,
+you will need to remove and rescan your device some other way for the
+new block size to be visible, if the size was changed with this command.</p></div>
 </div>
 </div>
 <div class="sect1">
@@ -793,7 +805,7 @@ for the new block size to be visible.</p></div>
 <p>
         Send the format command for the specified nsid. This can be
         used to override the default value for either character device
-        (0xffffffff) or the block device (result from NVME_IOCTL_ID).
+        (unspecified) or the block device (result from NVME_IOCTL_ID).
 </p>
 </dd>
 <dt class="hdlist1">
@@ -806,7 +818,22 @@ for the new block size to be visible.</p></div>
 <p>
         LBA Format: This field specifies the LBA format to apply to the NVM
         media. This corresponds to the LBA formats indicated in the
-        Identify Namespace command. Defaults to 0.
+        Identify Namespace command. Conflicts with --block-size argument.
+        Defaults to 0.
+</p>
+</dd>
+<dt class="hdlist1">
+-b &lt;block size&gt;
+</dt>
+<dt class="hdlist1">
+--block-size=&lt;block size&gt;
+</dt>
+<dd>
+<p>
+        Block Size: This field is used to specify the target block size to
+        format to. Potential lbaf values will be scanned and the lowest
+        numbered will be selected for the format operation. Conflicts with
+        --lbaf argument.
 </p>
 </dd>
 <dt class="hdlist1">
@@ -950,6 +977,17 @@ cellspacing="0" cellpadding="4">
 </p>
 </dd>
 <dt class="hdlist1">
+-f
+</dt>
+<dt class="hdlist1">
+--force
+</dt>
+<dd>
+<p>
+        Just send the command immediately without warning of the implications.
+</p>
+</dd>
+<dt class="hdlist1">
 -t &lt;timeout&gt;
 </dt>
 <dt class="hdlist1">
@@ -1000,7 +1038,7 @@ information:
 <div id="footer">
 <div id="footer-text">
 Last updated
- 2018-01-30 19:28:39 KST
+ 2019-09-18 00:00:58 JST
 </div>
 </div>
 </body>

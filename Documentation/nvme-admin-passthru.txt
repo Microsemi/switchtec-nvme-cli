@@ -15,7 +15,7 @@ SYNOPSIS
 		[--cdw13=<cdw13>] [--cdw14=<cdw14>] [--cdw15=<cdw15>]
 		[--data-len=<data-len> | -l <data-len>]
 		[--metadata-len=<len> | -m <len>]
-		[--input-file=<file> | -f <file>]
+		[--input-file=<file> | -i <file>]
 		[--read | -r ] [--write | -w]
 		[--timeout=<to> | -t <to>]
 		[--show-command | -s]
@@ -89,7 +89,7 @@ OPTIONS
 -d::
 --dry-run::
 	Do not actually send the command. If want to use --dry-run option,
-	--show-cmd option _must_ be set. Otherwise --dry-run optionn will be
+	--show-cmd option _must_ be set. Otherwise --dry-run option will be
 	_ignored_.
 
 -b::

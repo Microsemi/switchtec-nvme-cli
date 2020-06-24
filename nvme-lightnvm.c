@@ -64,8 +64,8 @@ int lnvm_do_init(char *dev, char *mmtype)
 		return fd;
 
 	memset(&init, 0, sizeof(struct nvm_ioctl_dev_init));
-	strncpy(init.dev, dev, DISK_NAME_LEN);
-	strncpy(init.mmtype, mmtype, NVM_MMTYPE_LEN);
+	strncpy(init.dev, dev, DISK_NAME_LEN - 1);
+	strncpy(init.mmtype, mmtype, NVM_MMTYPE_LEN - 1);
 
 	ret = ioctl(fd, NVM_DEV_INIT, &init);
 	switch (errno) {
@@ -157,9 +157,9 @@ int lnvm_do_create_tgt(char *devname, char *tgtname, char *tgttype,
 	if (fd < 0)
 		return fd;
 
-	strncpy(c.dev, devname, DISK_NAME_LEN);
-	strncpy(c.tgtname, tgtname, DISK_NAME_LEN);
-	strncpy(c.tgttype, tgttype, NVM_TTYPE_NAME_MAX);
+	strncpy(c.dev, devname, DISK_NAME_LEN - 1);
+	strncpy(c.tgtname, tgtname, DISK_NAME_LEN - 1);
+	strncpy(c.tgttype, tgttype, NVM_TTYPE_NAME_MAX - 1);
 	c.flags = flags;
 
 	/* Fall back into simple IOCTL version if no extended attributes used */
@@ -191,7 +191,7 @@ int lnvm_do_remove_tgt(char *tgtname)
 	if (fd < 0)
 		return fd;
 
-	strncpy(c.tgtname, tgtname, DISK_NAME_LEN);
+	strncpy(c.tgtname, tgtname, DISK_NAME_LEN - 1);
 	c.flags = 0;
 
 	ret = ioctl(fd, NVM_DEV_REMOVE, &c);
@@ -215,7 +215,7 @@ int lnvm_do_factory_init(char *devname, int erase_only_marked,
 
 	memset(&fact, 0, sizeof(struct nvm_ioctl_dev_factory));
 
-	strncpy(fact.dev, devname, DISK_NAME_LEN);
+	strncpy(fact.dev, devname, DISK_NAME_LEN - 1);
 	if (erase_only_marked)
 		fact.flags |= NVM_FACTORY_ERASE_ONLY_USER;
 	if (clear_host_marks)
@@ -239,8 +239,9 @@ int lnvm_do_factory_init(char *devname, int erase_only_marked,
 	return ret;
 }
 
-static void show_lnvm_id_grp(struct nvme_nvm_id_group *grp, int human)
+static void show_lnvm_id_grp(void *t, int human)
 {
+	struct nvme_nvm_id12_group *grp = t;
 	uint32_t mpos = (uint32_t)le32_to_cpu(grp->mpos);
 	uint32_t mccap = (uint32_t)le32_to_cpu(grp->mccap);
 
@@ -329,13 +330,15 @@ static void show_lnvm_ppaf(struct nvme_nvm_addr_format *ppaf)
 					ppaf->sect_offset, ppaf->sect_len);
 }
 
-static void show_lnvm_id_ns(struct nvme_nvm_id *id, unsigned int flags)
+static void show_lnvm_id12_ns(void *t, unsigned int flags)
 {
 	int i;
-	int human = flags & HUMAN;
+	int human = flags & VERBOSE;
+	struct nvme_nvm_id12 *id = t;
 
 	uint32_t cap = (uint32_t) le32_to_cpu(id->cap);
 	uint32_t dom = (uint32_t) le32_to_cpu(id->dom);
+	uint32_t cgrps = id->cgrps;
 
 	if (id->cgrps > 4) {
 		fprintf(stderr, "invalid identify geometry returned\n");
@@ -368,19 +371,77 @@ static void show_lnvm_id_ns(struct nvme_nvm_id *id, unsigned int flags)
 	}
 	show_lnvm_ppaf(&id->ppaf);
 
-	for (i = 0; i < id->cgrps; i++) {
+	for (i = 0; i < cgrps; i++) {
 		printf("grp      : %d\n", i);
-		show_lnvm_id_grp(&id->groups[i], human);
+		show_lnvm_id_grp((void *)&id->groups[i], human);
 	}
 }
 
-static int lnvm_get_identity(int fd, int nsid, struct nvme_nvm_id *nvm_id)
+static void show_lnvm_id20_ns(struct nvme_nvm_id20 *id, unsigned int flags)
+{
+	int human = flags & VERBOSE;
+	uint32_t mccap = (uint32_t) le32_to_cpu(id->mccap);
+
+	printf("ver_major     : %#x\n", id->mjr);
+	printf("ver_minor     : %#x\n", id->mnr);
+
+	printf("mccap         : %#x\n", mccap);
+	if (human) {
+		if (mccap & (1 << LNVM_IDFY_CAP_VCOPY))
+			printf("           [0]: Vector copy support\n");
+		if (mccap & (1 << LNVM_IDFY_CAP_MRESETS))
+			printf("           [1]: Multiple resets support\n");
+	}
+	printf("wit           : %d\n", id->wit);
+
+	printf("lba format\n");
+	printf(" grp len      : %d\n", id->lbaf.grp_len);
+	printf(" pu len       : %d\n", id->lbaf.pu_len);
+	printf(" chk len      : %d\n", id->lbaf.chk_len);
+	printf(" clba len     : %d\n", id->lbaf.lba_len);
+
+	printf("geometry\n");
+	printf(" num_grp      : %d\n", le16_to_cpu(id->num_grp));
+	printf(" num_pu       : %d\n", le16_to_cpu(id->num_pu));
+	printf(" num_chk      : %d\n", le32_to_cpu(id->num_chk));
+	printf(" clba         : %d\n", le32_to_cpu(id->clba));
+	printf("write req\n");
+	printf(" ws_min       : %d\n", le32_to_cpu(id->ws_min));
+	printf(" ws_opt       : %d\n", le32_to_cpu(id->ws_opt));
+	printf(" mw_cunits    : %d\n", le32_to_cpu(id->mw_cunits));
+	printf(" maxoc        : %d\n", le32_to_cpu(id->maxoc));
+	printf(" maxocpu      : %d\n", le32_to_cpu(id->maxocpu));
+	printf("perf metrics\n");
+	printf(" trdt (ns)    : %d\n", le32_to_cpu(id->trdt));
+	printf(" trdm (ns)    : %d\n", le32_to_cpu(id->trdm));
+	printf(" twrt (ns)    : %d\n", le32_to_cpu(id->twrt));
+	printf(" twrm (ns)    : %d\n", le32_to_cpu(id->twrm));
+	printf(" tcrst (ns)   : %d\n", le32_to_cpu(id->tcrst));
+	printf(" tcrsm (ns)   : %d\n", le32_to_cpu(id->tcrsm));
+}
+
+static void show_lnvm_id_ns(struct nvme_nvm_id *id, unsigned int flags)
+{
+	switch (id->ver_id) {
+		case 1:
+			show_lnvm_id12_ns((void *) id, flags);
+		break;
+		case 2:
+			show_lnvm_id20_ns((void *) id, flags);
+		break;
+		default:
+			fprintf(stderr, "Version %d not supported.\n",
+					id->ver_id);
+	}
+}
+
+int lnvm_get_identity(int fd, int nsid, struct nvme_nvm_id *nvm_id)
 {
 	struct nvme_admin_cmd cmd = {
 		.opcode		= nvme_nvm_admin_identity,
 		.nsid		= nsid,
 		.addr		= (__u64)(uintptr_t)nvm_id,
-		.data_len	= 0x1000,
+		.data_len	= sizeof(struct nvme_nvm_id),
 	};
 
 	return nvme_submit_passthru(fd, NVME_IOCTL_ADMIN_CMD, &cmd);
@@ -393,16 +454,90 @@ int lnvm_do_id_ns(int fd, int nsid, unsigned int flags)
 
 	err = lnvm_get_identity(fd, nsid, &nvm_id);
 	if (!err) {
-		if (flags & RAW)
+		if (flags & BINARY)
 			d_raw((unsigned char *)&nvm_id, sizeof(nvm_id));
-		else {
-			printf("LightNVM Identify Geometry (%d):\n", nsid);
+		else
 			show_lnvm_id_ns(&nvm_id, flags);
-		}
-	}
-	else if (err > 0)
+	} else if (err > 0)
 		fprintf(stderr, "NVMe Status:%s(%x) NSID:%d\n",
 			nvme_status_to_string(err), err, nsid);
+	return err;
+}
+
+static inline const char *print_chunk_state(__u8 cs)
+{
+	switch (cs) {
+	case 1 << 0:	return "FREE";
+	case 1 << 1:	return "CLOSED";
+	case 1 << 2:	return "OPEN";
+	case 1 << 3:	return "OFFLINE";
+	default:	return "UNKNOWN";
+	}
+}
+
+static inline const char *print_chunk_type(__u8 ct)
+{
+	switch (ct & 0xF) {
+	case 1 << 0:	return "SEQWRITE_REQ";
+	case 1 << 1:	return "RANDWRITE_ALLOWED";
+	default:	return "UNKNOWN";
+	}
+}
+
+static inline const char *print_chunk_attr(__u8 ct)
+{
+	switch (ct & 0xF0) {
+	case 1 << 4:	return "DEVIATED";
+	default:	return "NONE";
+	}
+}
+
+static void show_lnvm_chunk_log(struct nvme_nvm_chunk_desc *chunk_log,
+				__u32 data_len)
+{
+	int nr_entry = data_len / sizeof(struct nvme_nvm_chunk_desc);
+	int idx;
+
+	printf("Total chunks in namespace: %d\n", nr_entry);
+	for (idx = 0; idx < nr_entry; idx++) {
+		struct nvme_nvm_chunk_desc *desc = &chunk_log[idx];
+
+		printf(" [%5d] { ", idx);
+		printf("SLBA: 0x%016"PRIx64, le64_to_cpu(desc->slba));
+		printf(", WP: 0x%016"PRIx64, le64_to_cpu(desc->wp));
+		printf(", CNLB: 0x%016"PRIx64, le64_to_cpu(desc->cnlb));
+		printf(", State: %-8s", print_chunk_state(desc->cs));
+		printf(", Type: %-20s", print_chunk_type(desc->ct));
+		printf(", Attr: %-8s", print_chunk_attr(desc->ct));
+		printf(", WLI: %4d }\n", desc->wli);
+	}
+}
+
+int lnvm_do_chunk_log(int fd, __u32 nsid, __u32 data_len, void *data,
+			unsigned int flags)
+{
+	int err;
+
+	err = nvme_get_log13(fd, nsid, NVM_LID_CHUNK_INFO, 0, 0, 0,
+			false, data_len, data);
+	if (err > 0) {
+		fprintf(stderr, "NVMe Status:%s(%x) NSID:%d\n",
+			nvme_status_to_string(err), err, nsid);
+
+		goto out;
+	} else if (err < 0) {
+		err = -errno;
+		perror("nvme_get_log13");
+
+		goto out;
+	}
+
+	if (flags & BINARY)
+		d_raw(data, data_len);
+	else
+		show_lnvm_chunk_log(data, data_len);
+
+out:
 	return err;
 }
 
@@ -417,11 +552,11 @@ static void show_lnvm_bbtbl(struct nvme_nvm_bb_tbl *tbl)
 	printf("Use raw output to retrieve table.\n");
 }
 
-static int __lnvm_do_get_bbtbl(int fd, struct nvme_nvm_id *id,
+static int __lnvm_do_get_bbtbl(int fd, struct nvme_nvm_id12 *id,
 						struct ppa_addr ppa,
 						unsigned int flags)
 {
-	struct nvme_nvm_id_group *grp = &id->groups[0];
+	struct nvme_nvm_id12_group *grp = &id->groups[0];
 	int bbtblsz = ((uint16_t)le16_to_cpu(grp->num_blk) * grp->num_pln);
 	int bufsz = bbtblsz + sizeof(struct nvme_nvm_bb_tbl);
 	struct nvme_nvm_bb_tbl *bbtbl;
@@ -435,12 +570,13 @@ static int __lnvm_do_get_bbtbl(int fd, struct nvme_nvm_id *id,
 		.opcode		= nvme_nvm_admin_get_bb_tbl,
 		.nsid		= cpu_to_le32(1),
 		.addr		= (__u64)(uintptr_t)bbtbl,
-		.data_len	= cpu_to_le32(bufsz),
+		.data_len	= bufsz,
 		.ppa		= cpu_to_le64(ppa.ppa),
 	};
+	void *tmp = &cmd;
+	struct nvme_passthru_cmd *nvme_cmd = tmp;
 
-	err = nvme_submit_passthru(fd, NVME_IOCTL_ADMIN_CMD,
-					(struct nvme_passthru_cmd *)&cmd);
+	err = nvme_submit_passthru(fd, NVME_IOCTL_ADMIN_CMD, nvme_cmd);
 	if (err > 0) {
 		fprintf(stderr, "NVMe Status:%s(%x)\n",
 			nvme_status_to_string(err), err);
@@ -448,7 +584,7 @@ static int __lnvm_do_get_bbtbl(int fd, struct nvme_nvm_id *id,
 		return err;
 	}
 
-	if (flags & RAW)
+	if (flags & BINARY)
 		d_raw((unsigned char *)&bbtbl->blk, bbtblsz);
 	else {
 		printf("LightNVM Bad Block Stats:\n");
@@ -461,15 +597,22 @@ static int __lnvm_do_get_bbtbl(int fd, struct nvme_nvm_id *id,
 
 int lnvm_do_get_bbtbl(int fd, int nsid, int lunid, int chid, unsigned int flags)
 {
-	struct nvme_nvm_id nvm_id;
+	struct nvme_nvm_id12 nvm_id;
 	struct ppa_addr ppa;
 	int err;
+	void *tmp = &nvm_id;
 
-	err = lnvm_get_identity(fd, nsid, &nvm_id);
+	err = lnvm_get_identity(fd, nsid, (struct nvme_nvm_id *)tmp);
 	if (err) {
 		fprintf(stderr, "NVMe Status:%s(%x)\n",
 			nvme_status_to_string(err), err);
 		return err;
+	}
+
+	if (nvm_id.ver_id != 1) {
+		fprintf(stderr, "Get bad block table not supported on version %d\n",
+				nvm_id.ver_id);
+		return -EINVAL;
 	}
 
 	if (chid >= nvm_id.groups[0].num_ch ||
@@ -498,9 +641,10 @@ static int __lnvm_do_set_bbtbl(int fd, struct ppa_addr ppa, __u8 value)
 		.nlb		= cpu_to_le16(0),
 		.value		= value,
 	};
+	void *tmp = &cmd;
+	struct nvme_passthru_cmd *nvme_cmd = tmp;
 
-	err = nvme_submit_passthru(fd, NVME_IOCTL_ADMIN_CMD,
-					(struct nvme_passthru_cmd *)&cmd);
+	err = nvme_submit_passthru(fd, NVME_IOCTL_ADMIN_CMD, nvme_cmd);
 	if (err > 0) {
 		fprintf(stderr, "NVMe Status:%s(%x)\n",
 			nvme_status_to_string(err), err);
@@ -513,15 +657,22 @@ int lnvm_do_set_bbtbl(int fd, int nsid,
 				int chid, int lunid, int plnid, int blkid,
 				__u8 value)
 {
-	struct nvme_nvm_id nvm_id;
+	struct nvme_nvm_id12 nvm_id;
 	struct ppa_addr ppa;
 	int err;
+	void *tmp = &nvm_id;
 
-	err = lnvm_get_identity(fd, nsid, &nvm_id);
+	err = lnvm_get_identity(fd, nsid, (struct nvme_nvm_id *)tmp);
 	if (err) {
 		fprintf(stderr, "NVMe Status:%s(%x)\n",
 			nvme_status_to_string(err), err);
 		return err;
+	}
+
+	if (nvm_id.ver_id != 1) {
+		fprintf(stderr, "Set bad block table not supported on version %d\n",
+				nvm_id.ver_id);
+		return -EINVAL;
 	}
 
 	if (chid >= nvm_id.groups[0].num_ch ||

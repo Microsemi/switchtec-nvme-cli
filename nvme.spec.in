@@ -7,7 +7,7 @@ Group: 		Development/Tools
 URL: 		https://github.com/linux-nvme/nvme-cli/
 Source: 	nvme-@@VERSION@@.tar.gz
 Provides:	nvme
-Requires(post): uuidgen
+Requires(post): util-linux
 BuildRoot:	%{_tmppath}/%{name}-%{version}-root
 
 %description
@@ -22,38 +22,50 @@ make
 
 %install
 rm -rf $RPM_BUILD_ROOT
-make install DESTDIR=%{buildroot} PREFIX=/usr
+make install-spec DESTDIR=%{buildroot} PREFIX=/usr
 
 %files
 %defattr(-,root,root)
 %doc Documentation/nvme*.1
 %{_sbindir}/nvme
 %{_mandir}/man1/nvme*.1*
-%{_datadir}/bash_completion.d/nvme
+%{_datadir}/bash-completion/completions/nvme
+%{_datadir}/zsh/site-functions/_nvme
+%dir %{_sysconfdir}/nvme
+%{_sysconfdir}/nvme/hostnqn
+%{_sysconfdir}/nvme/hostid
+%{_sysconfdir}/nvme/discovery.conf
+%{_sysconfdir}/udev/rules.d/70-nvmf-autoconnect.rules
+%{_sysconfdir}/udev/rules.d/71-nvmf-iopolicy-netapp.rules
+%{_libdir}/dracut/dracut.conf.d/70-nvmf-autoconnect.conf
+%{_libdir}/systemd/system/nvmf-connect@.service
+%{_libdir}/systemd/system/nvmefc-boot-connections.service
+%{_libdir}/systemd/system/nvmf-connect.target
+%{_libdir}/systemd/system/nvmf-autoconnect.service
 
 %clean
 rm -rf $RPM_BUILD_ROOT
 
 %post
-if [ $1 = 1 ]; then # 1 : This package is being installed for the first time
-	if [ ! -f /etc/nvme/hostnqn ]; then
-		install -D /dev/null /etc/nvme/hostnqn
-		echo $(nvme gen-hostnqn) > /etc/nvme/hostnqn
+if [ $1 -eq 1 ]; then # 1 : This package is being installed for the first time
+	if [ ! -s %{_sysconfdir}/nvme/hostnqn ]; then
+		echo $(nvme gen-hostnqn) > %{_sysconfdir}/nvme/hostnqn
         fi
-        if [ ! -f /etc/nvme/hostid ]; then
-                uuidgen > /etc/nvme/hostid
+        if [ ! -s %{_sysconfdir}/nvme/hostid ]; then
+                uuidgen > %{_sysconfdir}/nvme/hostid
         fi
+
+	# apply udev and systemd changes that we did
+	systemctl daemon-reload
+	udevadm control --reload-rules && udevadm trigger
 fi
 
-%preun
-if [ "$1" = "remove" ]; then
-	if [ -d /etc/nvme ]; then
-		rm -f /etc/nvme/hostnqn
-		if [ ! -n "`ls -A /etc/nvme`" ]; then
-			rm -rf /etc/nvme
-		fi
-	fi
-fi
 %changelog
+* Tue Dec 17 2019 Simon Schricker <sschricker@suse.de>
+  - Add new udev rules to set iopolicy for NetApp devices
+
+* Mon Oct 15 2018 Eyal Ben-David <eyalbe@il.ibm.com> - 1.6.81.g899a-2
+- bash-completion check
+
 * Thu Oct 15 2015 Keith Busch <keith.busch@intel.com>
 - Initial RPM spec

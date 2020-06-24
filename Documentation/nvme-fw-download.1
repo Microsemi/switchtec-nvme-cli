@@ -1,13 +1,13 @@
 '\" t
 .\"     Title: nvme-fw-download
-.\"    Author: [FIXME: author] [see http://docbook.sf.net/el/author]
-.\" Generator: DocBook XSL Stylesheets v1.79.1 <http://docbook.sf.net/>
-.\"      Date: 12/10/2017
+.\"    Author: [FIXME: author] [see http://www.docbook.org/tdg5/en/html/author]
+.\" Generator: DocBook XSL Stylesheets vsnapshot <http://docbook.sf.net/>
+.\"      Date: 04/24/2020
 .\"    Manual: NVMe Manual
 .\"    Source: NVMe
 .\"  Language: English
 .\"
-.TH "NVME\-FW\-DOWNLOAD" "1" "12/10/2017" "NVMe" "NVMe Manual"
+.TH "NVME\-FW\-DOWNLOAD" "1" "04/24/2020" "NVMe" "NVMe Manual"
 .\" -----------------------------------------------------------------
 .\" * Define some portability stuff
 .\" -----------------------------------------------------------------
@@ -42,7 +42,7 @@ The Firmware Image Download command is used to download all or a portion of the 
 .sp
 The firmware image may be constructed of multiple pieces that are individually downloaded with separate Firmware Image Download commands\&. Each Firmware Image Download command includes a Dword Offset and Number of Dwords that specify a Dword range\&. The host software shall ensure that firmware pieces do not have Dword ranges that overlap\&. Firmware portions may be submitted out of order to the controller\&.
 .sp
-The new firmware image is not applied as part of the Firmware Image Download command\&. It is applied following a reset, where the image to apply and the firmware slot it should be committed to is specified with the Firmware Activate command\&.
+The new firmware image is not applied as part of the Firmware Image Download command\&. It is applied following a reset, where the image to apply and the firmware slot it should be committed to is specified with the Firmware Commit command (nvme fw\-commit <args>)\&.
 .SH "OPTIONS"
 .PP
 \-f <firmware\-file>, \-\-fw=<firmeware\-file>

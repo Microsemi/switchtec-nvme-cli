@@ -1,13 +1,22 @@
 CFLAGS ?= -O2 -g -Wall -Werror
-CFLAGS += -std=gnu99
-CPPFLAGS += -D_GNU_SOURCE -D__CHECK_ENDIAN__
+override CFLAGS += -std=gnu99 -I.
+override CPPFLAGS += -D_GNU_SOURCE -D__CHECK_ENDIAN__
 LIBUUID = $(shell $(LD) -o /dev/null -luuid >/dev/null 2>&1; echo $$?)
+
 NVME = switchtec-nvme
+LIBHUGETLBFS = $(shell $(LD) -o /dev/null -lhugetlbfs >/dev/null 2>&1; echo $$?)
+HAVE_SYSTEMD = $(shell pkg-config --exists libsystemd  --atleast-version=242; echo $$?)
 INSTALL ?= install
 DESTDIR =
-PREFIX ?= /usr/local
+DESTDIROLD = /usr/local/sbin
+PREFIX ?= /usr
 SYSCONFDIR = /etc
 SBINDIR = $(PREFIX)/sbin
+LIBDIR ?= $(PREFIX)/lib
+SYSTEMDDIR ?= $(LIBDIR)/systemd
+UDEVDIR ?= $(SYSCONFDIR)/udev
+UDEVRULESDIR ?= $(UDEVDIR)/rules.d
+DRACUTDIR ?= $(LIBDIR)/dracut
 LIB_DEPENDS =
 
 ifeq ($(LIBUUID),0)
@@ -16,11 +25,34 @@ ifeq ($(LIBUUID),0)
 	override LIB_DEPENDS += uuid
 endif
 
+ifeq ($(LIBHUGETLBFS),0)
+	override LDFLAGS += -lhugetlbfs
+	override CFLAGS += -DLIBHUGETLBFS
+	override LIB_DEPENDS += hugetlbfs
+endif
+
+INC=-Iutil -Iplugins/microchip 
+
+ifeq ($(HAVE_SYSTEMD),0)
+	override LDFLAGS += -lsystemd
+	override CFLAGS += -DHAVE_SYSTEMD
+endif
+
+LDFLAGS += -lswitchtec -lcrypto
+
 RPMBUILD = rpmbuild
 TAR = tar
 RM = rm -f
 
-AUTHOR=Keith Busch <keith.busch@intel.com>
+AUTHOR=Keith Busch <kbusch@kernel.org>
+
+ifneq ($(findstring $(MAKEFLAGS),s),s)
+ifndef V
+	QUIET_CC	= @echo '   ' CC $@;
+endif
+endif
+
+QUIET_CC=
 
 default: $(NVME)
 
@@ -31,20 +63,46 @@ override CFLAGS += -DNVME_VERSION='"$(NVME_VERSION)"'
 
 NVME_DPKG_VERSION=1~`lsb_release -sc`
 
-OBJS := argconfig.o suffix.o parser.o nvme-print.o nvme-ioctl.o \
-	nvme-lightnvm.o fabrics.o json.o plugin.o intel-nvme.o \
-	lnvm-nvme.o memblaze-nvme.o wdc-nvme.o wdc-utils.o nvme-models.o \
-	huawei-nvme.o netapp-nvme.o  toshiba-nvme.o switchtec-nvme-device.o \
-	rc-nvme-device.o switchtec-nvme.o
 
-$(NVME): nvme.c nvme.h $(OBJS) NVME-VERSION-FILE
-	$(CC) $(CPPFLAGS) $(CFLAGS) nvme.c -o $(NVME) $(OBJS) $(LDFLAGS) -lswitchtec
+OBJS := nvme-print.o nvme-ioctl.o \
+	nvme-lightnvm.o fabrics.o nvme-models.o plugin.o \
+	nvme-status.o nvme-filters.o nvme-topology.o
 
-nvme.o: nvme.c nvme.h nvme-device.h rc-nvme-device.h pax-nvme-device.h nvme-print.h nvme-ioctl.h argconfig.h suffix.h nvme-lightnvm.h fabrics.h
-	$(CC) $(CPPFLAGS) $(CFLAGS) -c $<
+UTIL_OBJS := util/argconfig.o util/suffix.o util/json.o util/parser.o
 
-%.o: %.c %.h nvme.h linux/nvme_ioctl.h nvme-ioctl.h nvme-print.h argconfig.h nvme-device.h
-	$(CC) $(CPPFLAGS) $(CFLAGS) -c $<
+PLUGIN_OBJS :=					\
+	plugins/intel/intel-nvme.o		\
+	plugins/lnvm/lnvm-nvme.o		\
+	plugins/memblaze/memblaze-nvme.o	\
+	plugins/wdc/wdc-nvme.o			\
+	plugins/wdc/wdc-utils.o			\
+	plugins/huawei/huawei-nvme.o		\
+	plugins/netapp/netapp-nvme.o		\
+	plugins/toshiba/toshiba-nvme.o		\
+	plugins/micron/micron-nvme.o		\
+	plugins/seagate/seagate-nvme.o 		\
+	plugins/virtium/virtium-nvme.o		\
+	plugins/shannon/shannon-nvme.o		\
+	plugins/dera/dera-nvme.o            \
+    plugins/transcend/transcend-nvme.o		\
+	plugins/microchip/switchtec-nvme.o	\
+	plugins/microchip/switchtec-nvme-device.o\
+	plugins/microchip/rc-nvme-device.o
+
+$(NVME): nvme.c nvme.h $(OBJS) $(PLUGIN_OBJS) $(UTIL_OBJS) NVME-VERSION-FILE
+	$(QUIET_CC)$(CC) $(CPPFLAGS) $(CFLAGS) $(INC) $< -o $(NVME) $(OBJS) $(PLUGIN_OBJS) $(UTIL_OBJS) $(LDFLAGS)
+
+verify-no-dep: nvme.c nvme.h $(OBJS) NVME-VERSION-FILE
+	$(QUIET_CC)$(CC) $(CPPFLAGS) $(CFLAGS) $< -o $@ $(OBJS) $(LDFLAGS)
+
+nvme.o: nvme.c nvme.h nvme-print.h nvme-ioctl.h util/argconfig.h util/suffix.h nvme-lightnvm.h fabrics.h
+	$(QUIET_CC)$(CC) $(CPPFLAGS) $(CFLAGS) $(INC) -c $<
+
+%.o: %.c %.h nvme.h linux/nvme.h linux/nvme_ioctl.h nvme-ioctl.h nvme-print.h util/argconfig.h
+	$(QUIET_CC)$(CC) $(CPPFLAGS) $(CFLAGS) $(INC) -o $@ -c $<
+
+%.o: %.c nvme.h linux/nvme.h linux/nvme_ioctl.h nvme-ioctl.h nvme-print.h util/argconfig.h
+	$(QUIET_CC)$(CC) $(CPPFLAGS) $(CFLAGS) $(INC) -o $@ -c $<
 
 doc: $(NVME)
 	$(MAKE) -C Documentation
@@ -55,9 +113,10 @@ test:
 all: doc
 
 clean:
-	$(RM) $(NVME) *.o *~ a.out NVME-VERSION-FILE *.tar* nvme.spec version control nvme-*.deb
+	$(RM) $(NVME) $(OBJS) $(PLUGIN_OBJS) $(UTIL_OBJS) *~ a.out NVME-VERSION-FILE *.tar* nvme.spec version control nvme-*.deb 70-nvmf-autoconnect.conf
 	$(MAKE) -C Documentation clean
 	$(RM) tests/*.pyc
+	$(RM) verify-no-dep
 
 clobber: clean
 	$(MAKE) -C Documentation clobber
@@ -66,17 +125,55 @@ install-man:
 	$(MAKE) -C Documentation install-no-build
 
 install-bin: default
+	$(RM) $(DESTDIROLD)/nvme
 	$(INSTALL) -d $(DESTDIR)$(SBINDIR)
 	$(INSTALL) -m 755 $(NVME) $(DESTDIR)$(SBINDIR)
 
 install-bash-completion:
-	$(INSTALL) -d $(DESTDIR)$(PREFIX)/share/bash_completion.d
-	$(INSTALL) -m 644 -T ./completions/bash-nvme-completion.sh $(DESTDIR)$(PREFIX)/share/bash_completion.d/nvme
+	$(INSTALL) -d $(DESTDIR)$(PREFIX)/share/bash-completion/completions
+	$(INSTALL) -m 644 -T ./completions/bash-nvme-completion.sh $(DESTDIR)$(PREFIX)/share/bash-completion/completions/nvme
 
-install: install-bin install-man install-bash-completion
+install-systemd:
+	$(INSTALL) -d $(DESTDIR)$(SYSTEMDDIR)/system
+	$(INSTALL) -m 644 ./nvmf-autoconnect/systemd/* $(DESTDIR)$(SYSTEMDDIR)/system
+
+install-udev:
+	$(INSTALL) -d $(DESTDIR)$(UDEVRULESDIR)
+	$(INSTALL) -m 644 ./nvmf-autoconnect/udev-rules/* $(DESTDIR)$(UDEVRULESDIR)
+
+install-dracut: 70-nvmf-autoconnect.conf
+	$(INSTALL) -d $(DESTDIR)$(DRACUTDIR)/dracut.conf.d
+	$(INSTALL) -m 644 $< $(DESTDIR)$(DRACUTDIR)/dracut.conf.d
+
+install-zsh-completion:
+	$(INSTALL) -d $(DESTDIR)$(PREFIX)/share/zsh/site-functions
+	$(INSTALL) -m 644 -T ./completions/_nvme $(DESTDIR)$(PREFIX)/share/zsh/site-functions/_nvme
+
+install-hostparams: install-etc
+	if [ ! -s $(DESTDIR)$(SYSCONFDIR)/nvme/hostnqn ]; then \
+		echo `$(DESTDIR)$(SBINDIR)/nvme gen-hostnqn` > $(DESTDIR)$(SYSCONFDIR)/nvme/hostnqn; \
+	fi
+	if [ ! -s $(DESTDIR)$(SYSCONFDIR)/nvme/hostid ]; then \
+		uuidgen > $(DESTDIR)$(SYSCONFDIR)/nvme/hostid; \
+	fi
+
+install-etc:
+	$(INSTALL) -d $(DESTDIR)$(SYSCONFDIR)/nvme
+	touch $(DESTDIR)$(SYSCONFDIR)/nvme/hostnqn
+	touch $(DESTDIR)$(SYSCONFDIR)/nvme/hostid
+	if [ ! -f $(DESTDIR)$(SYSCONFDIR)/nvme/discovery.conf ]; then \
+		$(INSTALL) -m 644 -T ./etc/discovery.conf.in $(DESTDIR)$(SYSCONFDIR)/nvme/discovery.conf; \
+	fi
+
+install-spec: install-bin install-man install-bash-completion install-zsh-completion install-etc install-systemd install-udev install-dracut
+install: install-spec install-hostparams
 
 nvme.spec: nvme.spec.in NVME-VERSION-FILE
 	sed -e 's/@@VERSION@@/$(NVME_VERSION)/g' < $< > $@+
+	mv $@+ $@
+
+70-nvmf-autoconnect.conf: nvmf-autoconnect/dracut-conf/70-nvmf-autoconnect.conf.in
+	sed -e 's#@@UDEVRULESDIR@@#$(UDEVRULESDIR)#g' < $< > $@+
 	mv $@+ $@
 
 dist: nvme.spec
@@ -140,7 +237,7 @@ deb-light: $(NVME) pkg nvme.control.in
 	dpkg-deb --build nvme-$(NVME_VERSION)
 
 rpm: dist
-	$(RPMBUILD) -ta nvme-$(NVME_VERSION).tar.gz
+	$(RPMBUILD) --define '_libdir ${LIBDIR}' -ta nvme-$(NVME_VERSION).tar.gz
 
 .PHONY: default doc all clean clobber install-man install-bin install
 .PHONY: dist pkg dist-orig deb deb-light rpm FORCE test
