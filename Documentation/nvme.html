@@ -1,9 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.1//EN"
     "http://www.w3.org/TR/xhtml11/DTD/xhtml11.dtd">
 <html xmlns="http://www.w3.org/1999/xhtml" xml:lang="en">
 <head>
 <meta http-equiv="Content-Type" content="application/xhtml+xml; charset=UTF-8" />
-<meta name="generator" content="AsciiDoc 8.6.8" />
+<meta name="generator" content="AsciiDoc 8.6.10" />
 <title>nvme(1)</title>
 <style type="text/css">
 /* Shared CSS for AsciiDoc xhtml11 and html5 backends */
@@ -94,7 +95,9 @@ ul > li > * { color: black; }
   padding: 0;
   margin: 0;
 }
-
+pre {
+  white-space: pre-wrap;
+}
 
 #author {
   color: #527bbd;
@@ -223,7 +226,7 @@ div.exampleblock > div.content {
 }
 
 div.imageblock div.content { padding-left: 0; }
-span.image img { border-style: none; }
+span.image img { border-style: none; vertical-align: text-bottom; }
 a.image:visited { color: white; }
 
 dl {
@@ -737,7 +740,7 @@ nvme(1) Manual Page
 <h2>NAME</h2>
 <div class="sectionbody">
 <p>nvme -
-   the dumb pci-e storage utility
+   the NVMe storage command line interface utility (nvme-cli)
 </p>
 </div>
 </div>
@@ -745,8 +748,14 @@ nvme(1) Manual Page
 <div class="sect1">
 <h2 id="_synopsis">SYNOPSIS</h2>
 <div class="sectionbody">
+<div class="paragraph"><p>built-in plugin:</p></div>
 <div class="verseblock">
 <pre class="content"><em>nvme</em> &lt;command&gt; &lt;device&gt; [&lt;args&gt;]</pre>
+<div class="attribution">
+</div></div>
+<div class="paragraph"><p>extension plugins:</p></div>
+<div class="verseblock">
+<pre class="content"><em>nvme</em> &lt;plugin&gt; &lt;command&gt; &lt;device&gt; [&lt;args&gt;]</pre>
 <div class="attribution">
 </div></div>
 </div>
@@ -755,7 +764,8 @@ nvme(1) Manual Page
 <h2 id="_description">DESCRIPTION</h2>
 <div class="sectionbody">
 <div class="paragraph"><p>NVM-Express is a fast, scalable host controller interface designed to
-address the needs for PCI Express based solid state drives.</p></div>
+address the needs for not only PCI Express based solid state drives, but
+also NVMe-oF(over fabrics).</p></div>
 <div class="paragraph"><p>This <em>nvme</em> program is a user space utility to provide standards compliant
 tooling for NVM-Express drives. It was made specifically for Linux as
 it relies on the IOCTLs defined by the mainline kernel driver.</p></div>
@@ -1105,11 +1115,43 @@ available, run "nvme help".</p></div>
 </p>
 </dd>
 <dt class="hdlist1">
+<a href="nvme-connect-all.html">nvme-connect-all(1)</a>
+</dt>
+<dd>
+<p>
+        Discover and connect to all NVMe-over-Fabrics subsystems
+</p>
+</dd>
+<dt class="hdlist1">
 <a href="nvme-connect.html">nvme-connect(1)</a>
 </dt>
 <dd>
 <p>
         Connect to an NVMe-over-Fabrics subsystem
+</p>
+</dd>
+<dt class="hdlist1">
+<a href="nvme-disconnect.html">nvme-disconnect(1)</a>
+</dt>
+<dd>
+<p>
+        Disconnect from an NVMe-over-Fabrics subsystem
+</p>
+</dd>
+<dt class="hdlist1">
+<a href="nvme-disconnect-all.html">nvme-disconnect-all(1)</a>
+</dt>
+<dd>
+<p>
+        Disconnect from all NVMe-over-Fabrics subsystems
+</p>
+</dd>
+<dt class="hdlist1">
+<a href="nvme-get-property.html">nvme-get-property(1)</a>
+</dt>
+<dd>
+<p>
+        Reads and shows NVMe-over-Fabrics controller property
 </p>
 </dd>
 </dl></div>
@@ -1126,7 +1168,7 @@ NVM-Express Site</a>.</p></div>
 <div class="sect1">
 <h2 id="_authors">Authors</h2>
 <div class="sectionbody">
-<div class="paragraph"><p>This is written and maintained by <a href="mailto:keith.busch@intel.com">Keith Busch</a>.</p></div>
+<div class="paragraph"><p>This is written and maintained by <a href="mailto:kbusch@kernel.org">Keith Busch</a>.</p></div>
 </div>
 </div>
 <div class="sect1">
@@ -1147,7 +1189,8 @@ NVM-Express Site</a>.</p></div>
 <div id="footnotes"><hr /></div>
 <div id="footer">
 <div id="footer-text">
-Last updated 2018-03-01 10:06:37 MST
+Last updated
+ 2020-02-15 08:33:28 JST
 </div>
 </div>
 </body>

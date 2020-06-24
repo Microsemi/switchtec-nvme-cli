@@ -3,7 +3,7 @@
  *
  * Copyright (c) 2014-2015, Intel Corporation.
  *
- * Written by Keith Busch <keith.busch@intel.com>
+ * Written by Keith Busch <kbusch@kernel.org>
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -24,7 +24,6 @@
  * This program uses NVMe IOCTLs to run native nvme commands to a device.
  */
 
-#include <endian.h>
 #include <errno.h>
 #include <getopt.h>
 #include <fcntl.h>
@@ -36,6 +35,11 @@
 #include <unistd.h>
 #include <math.h>
 #include <dirent.h>
+#include <libgen.h>
+
+#ifdef LIBHUGETLBFS
+#include <hugetlbfs.h>
+#endif
 
 #include <linux/fs.h>
 
@@ -45,32 +49,32 @@
 #include <sys/stat.h>
 #include <sys/time.h>
 
+
 #include <switchtec/switchtec.h>
+#include <switchtec/fabric.h>
 #include <switchtec/mrpc.h>
 
+#include "common.h"
 #include "nvme-print.h"
 #include "nvme-ioctl.h"
+#include "nvme-status.h"
 #include "nvme-lightnvm.h"
 #include "switchtec-nvme-device.h"
 #include "rc-nvme-device.h"
+#include "nvme-ioctl.h"
 #include "nvme-device.h"
 #include "plugin.h"
 
 #include "argconfig.h"
-
 #include "fabrics.h"
 
-#define array_len(x) ((size_t)(sizeof(x) / sizeof(x[0])))
-#define min(x, y) ((x) > (y) ? (y) : (x))
-#define max(x, y) ((x) > (y) ? (x) : (y))
+#define CREATE_CMD
+#include "nvme-builtin.h"
 
 struct stat nvme_stat;
 const char *devicename;
 
 static const char nvme_version_string[] = NVME_VERSION;
-
-#define CREATE_CMD
-#include "nvme-builtin.h"
 
 static struct plugin builtin = {
 	.commands = commands,
@@ -90,17 +94,61 @@ static struct program nvme = {
 	.extensions = &builtin,
 };
 
-static unsigned long long elapsed_utime(struct timeval start_time,
-					struct timeval end_time)
+static const char *output_format = "Output format: normal|json|binary";
+static const char *output_format_no_binary = "Output format: normal|json";
+
+static void *__nvme_alloc(size_t len, bool *huge)
 {
-	unsigned long long ret = (end_time.tv_sec - start_time.tv_sec) * 1000000 +
-		(end_time.tv_usec - start_time.tv_usec);
-	return ret;
+	void *p;
+
+	if (!posix_memalign(&p, getpagesize(), len)) {
+		*huge = false;
+		memset(p, 0, len);
+		return p;
+	}
+	return NULL;
 }
 
-struct nvme_device *global_device = NULL;
+#ifdef LIBHUGETLBFS
+#define HUGE_MIN 0x80000
 
-int open_dev(const char *path)
+static void nvme_free(void *p, bool huge)
+{
+	if (huge)
+		free_hugepage_region(p);
+	else
+		free(p);
+}
+
+static void *nvme_alloc(size_t len, bool *huge)
+{
+	void *p;
+
+	if (len < HUGE_MIN)
+		return __nvme_alloc(len, huge);
+
+	p = get_hugepage_region(len, GHR_DEFAULT);
+	if (!p)
+		return __nvme_alloc(len, huge);
+
+	*huge = true;
+	return p;
+}
+#else
+static void nvme_free(void *p, bool huge)
+{
+	free(p);
+}
+
+static void *nvme_alloc(size_t len, bool *huge)
+{
+	return __nvme_alloc(len, huge);
+}
+#endif
+
+extern struct nvme_device *global_device;
+
+static int open_dev(char *dev)
 {
 	int err, fd;
 	char device_str[64];
@@ -111,9 +159,9 @@ int open_dev(const char *path)
 	struct rc_nvme_device *rc;
 	int n;
 
-	devicename = basename(path);
+	devicename = basename(dev);
 
-	if (sscanf(path, "%2049[^@]@%s", pdfid_str, device_str) == 2) {
+	if (sscanf(dev, "%2049[^@]@%s", pdfid_str, device_str) == 2) {
 		n = sscanf(pdfid_str, "%hxn%d", &pdfid, &ns_id);
 		if (!n) {
 			return -1;
@@ -135,15 +183,24 @@ int open_dev(const char *path)
 			return -ENODEV;
 		}
 
+
 		global_device = &pax->device;
 		global_device->type = NVME_DEVICE_TYPE_PAX;
+		switchtec_set_pax_id(pax->dev, SWITCHTEC_PAX_ID_LOCAL);
+		err = switchtec_ep_tunnel_status(pax->dev, pax->pdfid, &pax->channel_status);
+		if (err)
+			switchtec_perror("Getting EP tunnel status");
+
+		if (pax->channel_status == SWITCHTEC_EP_TUNNEL_DISABLED)
+			switchtec_ep_tunnel_enable(pax->dev, pax->pdfid);
 
 		fd = 0;
 		err = 0;
 
 		return fd;
-	} else if (strchr(path, '/') || strchr(path, '\\')) {
-		err = open(path, O_RDONLY);
+	} else if (strchr(dev, '/') || strchr(dev, '\\')) {
+		devicename = basename(dev);
+		err = open(dev, O_RDONLY);
 		if (err < 0)
 			goto perror;
 		fd = err;
@@ -152,7 +209,7 @@ int open_dev(const char *path)
 		if (err < 0)
 			goto perror;
 		if (!S_ISCHR(nvme_stat.st_mode) && !S_ISBLK(nvme_stat.st_mode)) {
-			fprintf(stderr, "%s is not a block or character device\n", path);
+			fprintf(stderr, "%s is not a block or character device\n", dev);
 			return -ENODEV;
 		}
 
@@ -163,10 +220,10 @@ int open_dev(const char *path)
 
 		return fd;
 	}
+	
 	err = -1;
-
- perror:
-	perror(path);
+perror:
+	perror(dev);
 	return err;
 }
 
@@ -178,6 +235,10 @@ int close_dev(struct nvme_device *device)
 	if (device->type == NVME_DEVICE_TYPE_PAX) {
 		struct pax_nvme_device *pax;
 		pax = to_pax_nvme_device(device);
+
+		if (pax->channel_status == SWITCHTEC_EP_TUNNEL_DISABLED)
+			switchtec_ep_tunnel_disable(pax->dev, pax->pdfid);
+
 		switchtec_close(pax->dev);
 		free(pax);
 
@@ -211,28 +272,26 @@ static int get_dev(int argc, char **argv)
 	if (ret)
 		return ret;
 
-	return open_dev((const char *)argv[optind]);
+	return open_dev(argv[optind]);
 }
 
 int parse_and_open(int argc, char **argv, const char *desc,
-	const struct argconfig_commandline_options *clo, void *cfg, size_t size)
+	const struct argconfig_commandline_options *opts)
 {
 	int ret;
 
-	ret = argconfig_parse(argc, argv, desc, clo, cfg, size);
+	ret = argconfig_parse(argc, argv, desc, opts);
 	if (ret)
 		return ret;
 
 	ret = get_dev(argc, argv);
 	if (ret < 0)
-		argconfig_print_help(desc, clo);
+		argconfig_print_help(desc, opts);
 
 	return ret;
 }
 
-static const char *output_format = "Output format: normal|json|binary";
-
-int validate_output_format(char *format)
+enum nvme_print_flags validate_output_format(char *format)
 {
 	if (!format)
 		return -EINVAL;
@@ -253,12 +312,15 @@ static int get_smart_log(int argc, char **argv, struct command *cmd, struct plug
 			"(default) or binary.";
 	const char *namespace = "(optional) desired namespace";
 	const char *raw = "output in binary format";
-	int err, fmt, fd;
+	const char *human_readable = "show info in readable format";
+	enum nvme_print_flags flags;
+	int err, fd;
 
 	struct config {
 		__u32 namespace_id;
 		int   raw_binary;
 		char *output_format;
+		int   human_readable;
 	};
 
 	struct config cfg = {
@@ -266,44 +328,105 @@ static int get_smart_log(int argc, char **argv, struct command *cmd, struct plug
 		.output_format = "normal",
 	};
 
-	const struct argconfig_commandline_options command_line_options[] = {
-		{"namespace-id",  'n', "NUM", CFG_POSITIVE, &cfg.namespace_id,  required_argument, namespace},
-		{"output-format", 'o', "FMT", CFG_STRING,   &cfg.output_format, required_argument, output_format },
-		{"raw-binary",    'b', "",    CFG_NONE,     &cfg.raw_binary,    no_argument,       raw},
-		{NULL}
+
+	OPT_ARGS(opts) = {
+		OPT_UINT("namespace-id",   'n', &cfg.namespace_id,   namespace),
+		OPT_FMT("output-format",   'o', &cfg.output_format,  output_format),
+		OPT_FLAG("raw-binary",     'b', &cfg.raw_binary,     raw),
+		OPT_FLAG("human-readable", 'H', &cfg.human_readable, human_readable),
+		OPT_END()
 	};
 
-	fd = parse_and_open(argc, argv, desc, command_line_options, &cfg, sizeof(cfg));
+	err = fd = parse_and_open(argc, argv, desc, opts);
 	if (fd < 0)
-		return fd;
+		goto ret;
 
-	fmt = validate_output_format(cfg.output_format);
-	if (fmt < 0) {
-		err = fmt;
+	err = flags = validate_output_format(cfg.output_format);
+	if (flags < 0)
 		goto close_fd;
-	}
 	if (cfg.raw_binary)
-		fmt = BINARY;
+		flags = BINARY;
+	if (cfg.human_readable)
+		flags |= VERBOSE;
 
 	err = nvme_smart_log(fd, cfg.namespace_id, &smart_log);
-	if (!err) {
-		if (fmt == BINARY)
-			d_raw((unsigned char *)&smart_log, sizeof(smart_log));
-		else if (fmt == JSON)
-			json_smart_log(&smart_log, cfg.namespace_id, devicename);
-		else
-			show_smart_log(&smart_log, cfg.namespace_id, devicename);
-	}
+	if (!err)
+		nvme_show_smart_log(&smart_log, cfg.namespace_id, devicename,
+				    flags);
 	else if (err > 0)
-		fprintf(stderr, "NVMe Status:%s(%x)\n",
-					nvme_status_to_string(err), err);
+		nvme_show_status(err);
 	else
 		perror("smart log");
-
- close_fd:
+close_fd:
 	close(fd);
+ret:
+	return nvme_status_to_errno(err, false);
+}
 
-	return err;
+static int get_ana_log(int argc, char **argv, struct command *cmd,
+		struct plugin *plugin)
+{
+	const char *desc = "Retrieve ANA log for the given device in " \
+			    "decoded format (default), json or binary.";
+	void *ana_log;
+	int err, fd;
+	int groups = 0; /* Right now get all the per ANA group NSIDS */
+	size_t ana_log_len;
+	struct nvme_id_ctrl ctrl;
+	enum nvme_print_flags flags;
+
+	struct config {
+		char *output_format;
+	};
+
+	struct config cfg = {
+		.output_format = "normal",
+	};
+
+	OPT_ARGS(opts) = {
+		OPT_FMT("output-format", 'o', &cfg.output_format, output_format),
+		OPT_END()
+	};
+
+	err = fd = parse_and_open(argc, argv, desc, opts);
+	if (fd < 0)
+		goto ret;
+
+	err = flags = validate_output_format(cfg.output_format);
+	if (flags < 0)
+		goto close_fd;
+
+	err = nvme_identify_ctrl(fd, &ctrl);
+	if (err) {
+		fprintf(stderr, "ERROR : nvme_identify_ctrl() failed 0x%x\n",
+				err);
+		goto close_fd;
+	}
+
+	ana_log_len = sizeof(struct nvme_ana_rsp_hdr) +
+		le32_to_cpu(ctrl.nanagrpid) * sizeof(struct nvme_ana_group_desc);
+	if (!(ctrl.anacap & (1 << 6)))
+		ana_log_len += le32_to_cpu(ctrl.mnan) * sizeof(__le32);
+
+	ana_log = malloc(ana_log_len);
+	if (!ana_log) {
+		perror("malloc");
+		err = -ENOMEM;
+		goto close_fd;
+	}
+
+	err = nvme_ana_log(fd, ana_log, ana_log_len, groups ? NVME_ANA_LOG_RGO : 0);
+	if (!err) {
+		nvme_show_ana_log(ana_log, devicename, flags, ana_log_len);
+	} else if (err > 0)
+		nvme_show_status(err);
+	else
+		perror("ana-log");
+	free(ana_log);
+close_fd:
+	close(fd);
+ret:
+	return nvme_status_to_errno(err, false);
 }
 
 static int get_telemetry_log(int argc, char **argv, struct command *cmd, struct plugin *plugin)
@@ -312,122 +435,136 @@ static int get_telemetry_log(int argc, char **argv, struct command *cmd, struct 
 	const char *fname = "File name to save raw binary, includes header";
 	const char *hgen = "Have the host tell the controller to generate the report";
 	const char *cgen = "Gather report generated by the controller.";
+	const char *dgen = "Pick which telemetry data area to report. Default is all. Valid options are 1, 2, 3.";
+	const size_t bs = 512;
 	struct nvme_telemetry_log_page_hdr *hdr;
+	size_t full_size, offset = bs;
+	int err = 0, fd, output;
 	void *page_log;
-	size_t full_size, offset, num_blocks;
-	int err = 0 , fd, output;
 
 	struct config {
 		char *file_name;
 		__u32 host_gen;
 		int ctrl_init;
+		int data_area;
 	};
 	struct config cfg = {
 		.file_name = NULL,
 		.host_gen = 1,
 		.ctrl_init = 0,
+		.data_area = 3,
 	};
 
-	const struct argconfig_commandline_options command_line_options[] = {
-		{"output-file", 'o', "FILE", CFG_STRING, &cfg.file_name, required_argument, fname},
-		{"host-generate", 'h', "NUM", CFG_POSITIVE, &cfg.host_gen, required_argument, hgen},
-		{"controller-init", 'c', "", CFG_NONE, &cfg.ctrl_init, no_argument, cgen},
-		{NULL}
+	OPT_ARGS(opts) = {
+		OPT_FILE("output-file",     'o', &cfg.file_name, fname),
+		OPT_UINT("host-generate",   'g', &cfg.host_gen,  hgen),
+		OPT_FLAG("controller-init", 'c', &cfg.ctrl_init, cgen),
+		OPT_UINT("data-area",       'd', &cfg.data_area, dgen),
+		OPT_END()
 	};
 
-	fd = parse_and_open(argc, argv, desc, command_line_options, &cfg, sizeof(cfg));
-	if (fd < 0) {
-		fprintf(stderr, "parse and open failed\n");
-		return fd;
-	}
+	err = fd = parse_and_open(argc, argv, desc, opts);
+	if (fd < 0)
+		goto ret;
 
 	if (!cfg.file_name) {
 		fprintf(stderr, "Please provide an output file!\n");
-		err = EINVAL;
-		goto close_fd;
-	}
-
-	output = open(cfg.file_name, O_WRONLY | O_CREAT | O_TRUNC, 0666);
-	if (output < 0) {
-		fprintf(stderr, "Failed to open output file!\n");
-		err = output;
+		err = -EINVAL;
 		goto close_fd;
 	}
 
 	cfg.host_gen = !!cfg.host_gen;
+	hdr = malloc(bs);
+	page_log = malloc(bs);
+	if (!hdr || !page_log) {
+		fprintf(stderr, "Failed to allocate %zu bytes for log: %s\n",
+				bs, strerror(errno));
+		err = -ENOMEM;
+		goto free_mem;
+	}
+	memset(hdr, 0, bs);
 
-	hdr = malloc(4096);
-	memset(hdr, 0, 4096);
+	output = open(cfg.file_name, O_WRONLY | O_CREAT | O_TRUNC, 0666);
+	if (output < 0) {
+		fprintf(stderr, "Failed to open output file %s: %s!\n",
+				cfg.file_name, strerror(errno));
+		err = output;
+		goto free_mem;
+	}
 
-	err = nvme_get_telemetry_log(fd, hdr, cfg.host_gen, cfg.ctrl_init, 4096, 0);
-	if (err) {
-		fprintf(stderr, "NVMe Status:%s(%x)\n",
-			nvme_status_to_string(err), err);
-		fprintf(stderr, "Failed to aquire telemetry header %d!\n", err);
-		free(hdr);
+	err = nvme_get_telemetry_log(fd, hdr, cfg.host_gen, cfg.ctrl_init, bs, 0);
+	if (err < 0)
+		perror("get-telemetry-log");
+	else if (err > 0) {
+		nvme_show_status(err);
+		fprintf(stderr, "Failed to acquire telemetry header %d!\n", err);
 		goto close_output;
 	}
 
-	err = write(output, (void *) hdr, 4096);
-	if (err != 4096) {
-		fprintf(stderr, "Failed to flush all data to file!");
-		goto free_hdr;
+	err = write(output, (void *) hdr, bs);
+	if (err != bs) {
+		fprintf(stderr, "Failed to flush all data to file!\n");
+		goto close_output;
 	}
 
-	num_blocks = max(hdr->dalb1, max(hdr->dalb2, hdr->dalb3));
-
-	full_size = num_blocks * 512;
-	/* Round to page boundary */
-	full_size += (4096 - (full_size % 4096));
-	/* We've already pulled 1 page worth of data, lets remove that. */
-	full_size -= 4096;
-	offset = 4096;
-
-	page_log = malloc(4096);
-	if (!page_log) {
-		fprintf(stderr, "Failed to allocate %zu bytes for log\n",
-			full_size);
-		err = ENOMEM;
-		goto free_hdr;
+	switch (cfg.data_area) {
+	case 1:
+		full_size = (le16_to_cpu(hdr->dalb1) * bs) + offset;
+		break;
+	case 2:
+		full_size = (le16_to_cpu(hdr->dalb2) * bs) + offset;
+		break;
+	case 3:
+		full_size = (le16_to_cpu(hdr->dalb3) * bs) + offset;
+		break;
+	default:
+		fprintf(stderr, "Invalid data area requested\n");
+		err = -EINVAL;
+		goto close_output;
 	}
 
-	while (full_size) {
-		err = nvme_get_telemetry_log(fd, page_log, 0, cfg.ctrl_init, 4096, offset);
-		if (err) {
-			fprintf(stderr, "Failed to aquire full telemetry log!\n");
-			fprintf(stderr, "NVMe Status:%s(%x)\n",
-				nvme_status_to_string(err), err);
+	/*
+	 * Continuously pull data until the offset hits the end of the last
+	 * block.
+	 */
+	while (offset != full_size) {
+		err = nvme_get_telemetry_log(fd, page_log, 0, cfg.ctrl_init, bs, offset);
+		if (err < 0) {
+			perror("get-telemetry-log");
+			break;
+		} else if (err > 0) {
+			fprintf(stderr, "Failed to acquire full telemetry log!\n");
+			nvme_show_status(err);
 			break;
 		}
 
-		err = write(output, (void *) page_log, 4096);
-		if (err != 4096) {
-			fprintf(stderr, "Failed to flush all data to file!");
+		err = write(output, (void *) page_log, bs);
+		if (err != bs) {
+			fprintf(stderr, "Failed to flush all data to file!\n");
 			break;
 		}
-		full_size -= 4096;
-		offset += 4096;
+		err = 0;
+		offset += bs;
 	}
 
-	free(page_log);
- free_hdr:
-	free(hdr);
- close_output:
+close_output:
 	close(output);
- close_fd:
+free_mem:
+	free(hdr);
+	free(page_log);
+close_fd:
 	close(fd);
-	return err;
+ret:
+	return nvme_status_to_errno(err, false);
 }
 
 static int get_endurance_log(int argc, char **argv, struct command *cmd, struct plugin *plugin)
 {
 	struct nvme_endurance_group_log endurance_log;
-
 	const char *desc = "Retrieves endurance groups log page and prints the log.";
 	const char *group_id = "The endurance group identifier";
-
+	enum nvme_print_flags flags;
 	int err, fd;
-	int fmt;
 
 	struct config {
 		char *output_format;
@@ -439,47 +576,42 @@ static int get_endurance_log(int argc, char **argv, struct command *cmd, struct 
 		.group_id = 0,
 	};
 
-	const struct argconfig_commandline_options command_line_options[] = {
-		{"output-format", 'o', "FMT", CFG_STRING, &cfg.output_format, required_argument, output_format},
-		{"group-id",      'g', "NUM", CFG_SHORT,  &cfg.group_id,      required_argument, group_id},
+	OPT_ARGS(opts) = {
+		OPT_FMT("output-format", 'o', &cfg.output_format, output_format),
+		OPT_UINT("group-id",     'g', &cfg.group_id,      group_id),
+		OPT_END()
 	};
 
-	fd = parse_and_open(argc, argv, desc, command_line_options, &cfg, sizeof(cfg));
+	err = fd = parse_and_open(argc, argv, desc, opts);
 	if (fd < 0)
-		return fd;
+		goto ret;
 
-	fmt = validate_output_format(cfg.output_format);
-	if (fmt < 0)
-		return fmt;
+	err = flags = validate_output_format(cfg.output_format);
+	if (flags < 0)
+		goto close_fd;
 
 	err = nvme_endurance_log(fd, cfg.group_id, &endurance_log);
-	if (!err) {
-		if (fmt == BINARY)
-			d_raw((unsigned char *)&endurance_log, sizeof(endurance_log));
-		else if (fmt == JSON)
-			json_endurance_log(&endurance_log, cfg.group_id, devicename);
-		else
-			show_endurance_log(&endurance_log, cfg.group_id, devicename);
-	} else if (err > 0)
-		fprintf(stderr, "NVMe Status:%s(%x)\n",
-					nvme_status_to_string(err), err);
+	if (!err)
+		nvme_show_endurance_log(&endurance_log, cfg.group_id, devicename, flags);
+	else if (err > 0)
+		nvme_show_status(err);
 	else
 		perror("endurance log");
-
+close_fd:
 	close(fd);
-	return err;
+ret:
+	return nvme_status_to_errno(err, false);
 }
 
 static int get_effects_log(int argc, char **argv, struct command *cmd, struct plugin *plugin)
 {
 	const char *desc = "Retrieve command effects log page and print the table.";
-	const char *raw_binary = "show infos in binary format";
-	const char *human_readable = "show infos in readable format";
+	const char *raw = "show log in binary format";
+	const char *human_readable = "show log in readable format";
 	struct nvme_effects_log_page effects;
 
 	int err, fd;
-	int fmt;
-	unsigned int flags = 0;
+	enum nvme_print_flags flags;
 
 	struct config {
 		int   raw_binary;
@@ -491,46 +623,36 @@ static int get_effects_log(int argc, char **argv, struct command *cmd, struct pl
 		.output_format = "normal",
 	};
 
-	const struct argconfig_commandline_options command_line_options[] = {
-		{"output-format", 'o', "FMT", CFG_STRING,   &cfg.output_format, required_argument, output_format},
-		{"human-readable",'H', "",    CFG_NONE,     &cfg.human_readable,no_argument,       human_readable},
-		{"raw-binary",    'b', "",    CFG_NONE,     &cfg.raw_binary,    no_argument,       raw_binary},
-		{NULL}
+	OPT_ARGS(opts) = {
+		OPT_FMT("output-format",  'o', &cfg.output_format,  output_format),
+		OPT_FLAG("human-readable",'H', &cfg.human_readable, human_readable),
+		OPT_FLAG("raw-binary",    'b', &cfg.raw_binary,     raw),
+		OPT_END()
 	};
 
-	fd = parse_and_open(argc, argv, desc, command_line_options, &cfg, sizeof(cfg));
+	err = fd = parse_and_open(argc, argv, desc, opts);
 	if (fd < 0)
-		return fd;
+		goto ret;
 
-	fmt = validate_output_format(cfg.output_format);
-	if (fmt < 0) {
-		err = fmt;
+	err = flags = validate_output_format(cfg.output_format);
+	if (flags < 0)
 		goto close_fd;
-	}
 	if (cfg.raw_binary)
-		fmt = BINARY;
-
+		flags = BINARY;
 	if (cfg.human_readable)
-		flags |= HUMAN;
+		flags |= VERBOSE;
 
 	err = nvme_effects_log(fd, &effects);
-	if (!err) {
-		if (fmt == BINARY)
-			d_raw((unsigned char *)&effects, sizeof(effects));
-		else if (fmt == JSON)
-			json_effects_log(&effects, devicename);
-		else
-			show_effects_log(&effects, flags);
-	}
+	if (!err)
+		nvme_show_effects_log(&effects, flags);
 	else if (err > 0)
-		fprintf(stderr, "NVMe Status:%s(%x)\n",
-				nvme_status_to_string(err), err);
+		nvme_show_status(err);
 	else
 		perror("effects log page");
-
- close_fd:
+close_fd:
 	close(fd);
-	return err;
+ret:
+	return nvme_status_to_errno(err, false);
 }
 
 static int get_error_log(int argc, char **argv, struct command *cmd, struct plugin *plugin)
@@ -539,9 +661,11 @@ static int get_error_log(int argc, char **argv, struct command *cmd, struct plug
 		"error log entries from a given device "\
 		"in either decoded format (default) or binary.";
 	const char *log_entries = "number of entries to retrieve";
-	const char *raw_binary = "dump in binary format";
+	const char *raw = "dump in binary format";
+	struct nvme_error_log_page *err_log;
 	struct nvme_id_ctrl ctrl;
-	int err, fmt, fd;
+	enum nvme_print_flags flags;
+	int err, fd;
 
 	struct config {
 		__u32 log_entries;
@@ -554,77 +678,69 @@ static int get_error_log(int argc, char **argv, struct command *cmd, struct plug
 		.output_format = "normal",
 	};
 
-	const struct argconfig_commandline_options command_line_options[] = {
-		{"log-entries",   'e', "NUM", CFG_POSITIVE, &cfg.log_entries,   required_argument, log_entries},
-		{"raw-binary",    'b', "",    CFG_NONE,     &cfg.raw_binary,    no_argument,       raw_binary},
-		{"output-format", 'o', "FMT", CFG_STRING,   &cfg.output_format, required_argument, output_format },
-		{NULL}
+	OPT_ARGS(opts) = {
+		OPT_UINT("log-entries",  'e', &cfg.log_entries,   log_entries),
+		OPT_FMT("output-format", 'o', &cfg.output_format, output_format),
+		OPT_FLAG("raw-binary",   'b', &cfg.raw_binary,    raw),
+		OPT_END()
 	};
 
-	fd = parse_and_open(argc, argv, desc, command_line_options, &cfg, sizeof(cfg));
+	err = fd = parse_and_open(argc, argv, desc, opts);
 	if (fd < 0)
-		return fd;
+		goto ret;
 
-	fmt = validate_output_format(cfg.output_format);
-	if (fmt < 0) {
-		err = fmt;
+	err = flags = validate_output_format(cfg.output_format);
+	if (flags < 0)
 		goto close_fd;
-	}
 	if (cfg.raw_binary)
-		fmt = BINARY;
+		flags = BINARY;
 
 	if (!cfg.log_entries) {
 		fprintf(stderr, "non-zero log-entries is required param\n");
-		err = EINVAL;
+		err = -EINVAL;
 		goto close_fd;
 	}
 
 	err = nvme_identify_ctrl(fd, &ctrl);
-	if (err < 0)
+	if (err < 0) {
 		perror("identify controller");
-	else if (err) {
+		goto close_fd;
+	} else if (err) {
 		fprintf(stderr, "could not identify controller\n");
-		err = ENODEV;
-	} else {
-		struct nvme_error_log_page *err_log;
-
-		cfg.log_entries = min(cfg.log_entries, ctrl.elpe + 1);
-		err_log = calloc(cfg.log_entries, sizeof(struct nvme_error_log_page));
-		if (!err_log) {
-			fprintf(stderr, "could not alloc buffer for error log\n");
-			err = ENOMEM;
-			goto close_fd;
-		}
-
-		err = nvme_error_log(fd, cfg.log_entries, err_log);
-		if (!err) {
-			if (fmt == BINARY)
-				d_raw((unsigned char *)err_log, sizeof(err_log));
-			else if (fmt == JSON)
-				json_error_log(err_log, cfg.log_entries, devicename);
-			else
-				show_error_log(err_log, cfg.log_entries, devicename);
-		}
-		else if (err > 0)
-			fprintf(stderr, "NVMe Status:%s(%x)\n",
-						nvme_status_to_string(err), err);
-		else
-			perror("error log");
-		free(err_log);
+		err = -ENODEV;
+		goto close_fd;
 	}
 
- close_fd:
+	cfg.log_entries = min(cfg.log_entries, ctrl.elpe + 1);
+	err_log = calloc(cfg.log_entries, sizeof(struct nvme_error_log_page));
+	if (!err_log) {
+		fprintf(stderr, "could not alloc buffer for error log\n");
+		err = -ENOMEM;
+		goto close_fd;
+	}
+
+	err = nvme_error_log(fd, cfg.log_entries, err_log);
+	if (!err)
+		nvme_show_error_log(err_log, cfg.log_entries, devicename, flags);
+	else if (err > 0)
+		nvme_show_status(err);
+	else
+		perror("error log");
+	free(err_log);
+close_fd:
 	close(fd);
-	return err;
+ret:
+	return nvme_status_to_errno(err, false);
 }
 
 static int get_fw_log(int argc, char **argv, struct command *cmd, struct plugin *plugin)
 {
 	const char *desc = "Retrieve the firmware log for the "\
 		"specified device in either decoded format (default) or binary.";
-	const char *raw_binary = "use binary output";
-	int err, fmt, fd;
+	const char *raw = "use binary output";
 	struct nvme_firmware_log_page fw_log;
+	enum nvme_print_flags flags;
+	int err, fd;
 
 	struct config {
 		int raw_binary;
@@ -635,42 +751,82 @@ static int get_fw_log(int argc, char **argv, struct command *cmd, struct plugin 
 		.output_format = "normal",
 	};
 
-	const struct argconfig_commandline_options command_line_options[] = {
-		{"raw-binary",    'b', "",    CFG_NONE,   &cfg.raw_binary,    no_argument,       raw_binary},
-		{"output-format", 'o', "FMT", CFG_STRING, &cfg.output_format, required_argument, output_format },
-		{NULL}
+	OPT_ARGS(opts) = {
+		OPT_FMT("output-format", 'o', &cfg.output_format, output_format),
+		OPT_FLAG("raw-binary",   'b', &cfg.raw_binary,    raw),
+		OPT_END()
 	};
 
-	fd = parse_and_open(argc, argv, desc, command_line_options, &cfg, sizeof(cfg));
+	err = fd = parse_and_open(argc, argv, desc, opts);
 	if (fd < 0)
-		return fd;
+		goto ret;
 
-	fmt = validate_output_format(cfg.output_format);
-	if (fmt < 0) {
-		err = fmt;
+	err = flags = validate_output_format(cfg.output_format);
+	if (flags < 0)
 		goto close_fd;
-	}
 	if (cfg.raw_binary)
-		fmt = BINARY;
+		flags = BINARY;
 
 	err = nvme_fw_log(fd, &fw_log);
-	if (!err) {
-		if (fmt == BINARY)
-			d_raw((unsigned char *)&fw_log, sizeof(fw_log));
-		else if (fmt == JSON)
-			json_fw_log(&fw_log, devicename);
-		else
-			show_fw_log(&fw_log, devicename);
-	}
+	if (!err)
+		nvme_show_fw_log(&fw_log, devicename, flags);
 	else if (err > 0)
-		fprintf(stderr, "NVMe Status:%s(%x)\n",
-				nvme_status_to_string(err), err);
+		nvme_show_status(err);
 	else
 		perror("fw log");
-
- close_fd:
+close_fd:
 	close(fd);
-	return err;
+ret:
+	return nvme_status_to_errno(err, false);
+}
+
+static int get_changed_ns_list_log(int argc, char **argv, struct command *cmd, struct plugin *plugin)
+{
+	struct nvme_changed_ns_list_log changed_ns_list_log;
+	const char *desc = "Retrieve Changed Namespaces log for the given device "\
+			"in either decoded format "\
+			"(default) or binary.";
+	const char *raw = "output in binary format";
+	enum nvme_print_flags flags;
+	int err, fd;
+
+	struct config {
+		int   raw_binary;
+		char *output_format;
+	};
+
+	struct config cfg = {
+		.output_format = "normal",
+	};
+
+	OPT_ARGS(opts) = {
+		OPT_FMT("output-format", 'o', &cfg.output_format, output_format),
+		OPT_FLAG("raw-binary",   'b', &cfg.raw_binary,    raw),
+		OPT_END()
+	};
+
+	err = fd = parse_and_open(argc, argv, desc, opts);
+	if (fd < 0)
+		goto ret;
+
+	err = flags = validate_output_format(cfg.output_format);
+	if (flags < 0)
+		goto close_fd;
+	if (cfg.raw_binary)
+		flags = BINARY;
+
+	err = nvme_changed_ns_list_log(fd, &changed_ns_list_log);
+	if (!err)
+		nvme_show_changed_ns_list_log(&changed_ns_list_log, devicename,
+					      flags);
+	else if (err > 0)
+		nvme_show_status(err);
+	else
+		perror("changed ns list log");
+close_fd:
+	close(fd);
+ret:
+	return nvme_status_to_errno(err, false);
 }
 
 static int get_log(int argc, char **argv, struct command *cmd, struct plugin *plugin)
@@ -684,7 +840,9 @@ static int get_log(int argc, char **argv, struct command *cmd, struct plugin *pl
 	const char *aen = "result of the aen, use to override log id";
 	const char *lsp = "log specific field";
 	const char *lpo = "log page offset specifies the location within a log page from where to start returning data";
-	const char *raw_binary = "output in raw format";
+	const char *rae = "retain an asynchronous event";
+	const char *raw = "output in raw format";
+	const char *uuid_index = "UUID index";
 	int err, fd;
 
 	struct config {
@@ -694,6 +852,8 @@ static int get_log(int argc, char **argv, struct command *cmd, struct plugin *pl
 		__u32 aen;
 		__u64 lpo;
 		__u8  lsp;
+		__u8  uuid_index;
+		int   rae;
 		int   raw_binary;
 	};
 
@@ -703,22 +863,26 @@ static int get_log(int argc, char **argv, struct command *cmd, struct plugin *pl
 		.log_len      = 0,
 		.lpo          = NVME_NO_LOG_LPO,
 		.lsp          = NVME_NO_LOG_LSP,
+		.rae          = 0,
+		.uuid_index   = 0,
 	};
 
-	const struct argconfig_commandline_options command_line_options[] = {
-		{"namespace-id", 'n', "NUM", CFG_POSITIVE, &cfg.namespace_id, required_argument, namespace_id},
-		{"log-id",       'i', "NUM", CFG_POSITIVE, &cfg.log_id,       required_argument, log_id},
-		{"log-len",      'l', "NUM", CFG_POSITIVE, &cfg.log_len,      required_argument, log_len},
-		{"aen",          'a', "NUM", CFG_POSITIVE, &cfg.aen,          required_argument, aen},
-		{"raw-binary",   'b', "",    CFG_NONE,     &cfg.raw_binary,   no_argument,       raw_binary},
-		{"lpo",          'o', "NUM", CFG_LONG,     &cfg.lpo,          required_argument, lpo},
-		{"lsp",          's', "NUM", CFG_BYTE,     &cfg.lsp,          required_argument, lsp},
-		{NULL}
+	OPT_ARGS(opts) = {
+		OPT_UINT("namespace-id", 'n', &cfg.namespace_id, namespace_id),
+		OPT_UINT("log-id",       'i', &cfg.log_id,       log_id),
+		OPT_UINT("log-len",      'l', &cfg.log_len,      log_len),
+		OPT_UINT("aen",          'a', &cfg.aen,          aen),
+		OPT_LONG("lpo",          'o', &cfg.lpo,          lpo),
+		OPT_BYTE("lsp",          's', &cfg.lsp,          lsp),
+		OPT_FLAG("rae",          'r', &cfg.rae,          rae),
+		OPT_BYTE("uuid-index",   'U', &cfg.uuid_index,   uuid_index),
+		OPT_FLAG("raw-binary",   'b', &cfg.raw_binary,   raw),
+		OPT_END()
 	};
 
-	fd = parse_and_open(argc, argv, desc, command_line_options, &cfg, sizeof(cfg));
+	err = fd = parse_and_open(argc, argv, desc, opts);
 	if (fd < 0)
-		return fd;
+		goto ret;
 
 	if (cfg.aen) {
 		cfg.log_len = 4096;
@@ -727,26 +891,27 @@ static int get_log(int argc, char **argv, struct command *cmd, struct plugin *pl
 
 	if (cfg.log_id > 0xff) {
 		fprintf(stderr, "Invalid log identifier: %d. Valid range: 0-255\n", cfg.log_id);
-		err = EINVAL;
+		err = -EINVAL;
 		goto close_fd;
 	}
 
 	if (!cfg.log_len) {
 		fprintf(stderr, "non-zero log-len is required param\n");
-		err = EINVAL;
+		err = -EINVAL;
 	} else {
 		unsigned char *log;
 
 		log = malloc(cfg.log_len);
 		if (!log) {
-			fprintf(stderr, "could not alloc buffer for log\n");
-			err = EINVAL;
+			fprintf(stderr, "could not alloc buffer for log: %s\n",
+					strerror(errno));
+			err = -EINVAL;
 			goto close_fd;
 		}
 
-		err = nvme_get_log13(fd, cfg.namespace_id, cfg.log_id,
-				     cfg.lsp, cfg.lpo, 0,
-				     cfg.log_len, log);
+		err = nvme_get_log14(fd, cfg.namespace_id, cfg.log_id,
+				     cfg.lsp, cfg.lpo, 0, cfg.rae,
+				     cfg.uuid_index, cfg.log_len, log);
 		if (!err) {
 			if (!cfg.raw_binary) {
 				printf("Device:%s log-id:%d namespace-id:%#x\n",
@@ -756,28 +921,25 @@ static int get_log(int argc, char **argv, struct command *cmd, struct plugin *pl
 			} else
 				d_raw((unsigned char *)log, cfg.log_len);
 		} else if (err > 0)
-			fprintf(stderr, "NVMe Status:%s(%x)\n",
-						nvme_status_to_string(err), err);
+			nvme_show_status(err);
 		else
 			perror("log page");
 		free(log);
 	}
-
- close_fd:
+close_fd:
 	close(fd);
-	return err;
+ret:
+	return nvme_status_to_errno(err, false);
 }
 
 static int sanitize_log(int argc, char **argv, struct command *command, struct plugin *plugin)
 {
 	const char *desc = "Retrieve sanitize log and show it.";
-	const char *raw_binary = "show infos in binary format";
-	const char *human_readable = "show infos in readable format";
-	int fd;
-	int ret;
-	int fmt;
-	unsigned int flags = 0;
+	const char *raw = "show log in binary format";
+	const char *human_readable = "show log in readable format";
 	struct nvme_sanitize_log_page sanitize_log;
+	enum nvme_print_flags flags;
+	int fd, err;
 
 	struct config {
 		int   raw_binary;
@@ -789,46 +951,36 @@ static int sanitize_log(int argc, char **argv, struct command *command, struct p
 		.output_format = "normal",
 	};
 
-	const struct argconfig_commandline_options command_line_options[] = {
-		{"output-format", 'o', "FMT", CFG_STRING,   &cfg.output_format, required_argument, output_format},
-		{"human-readable",'H', "",    CFG_NONE,     &cfg.human_readable,no_argument,       human_readable},
-		{"raw-binary",    'b', "",    CFG_NONE,     &cfg.raw_binary,    no_argument,       raw_binary},
-		{NULL}
+	OPT_ARGS(opts) = {
+		OPT_FMT("output-format",  'o', &cfg.output_format,  output_format),
+		OPT_FLAG("human-readable",'H', &cfg.human_readable, human_readable),
+		OPT_FLAG("raw-binary",    'b', &cfg.raw_binary,     raw),
+		OPT_END()
 	};
 
-	fd = parse_and_open(argc, argv, desc, command_line_options, &cfg, sizeof(cfg));
+	err = fd = parse_and_open(argc, argv, desc, opts);
 	if (fd < 0)
-		return fd;
+		goto ret;
 
-	fmt = validate_output_format(cfg.output_format);
-	if (fmt < 0) {
-		ret = fmt;
+	err = flags = validate_output_format(cfg.output_format);
+	if (flags < 0)
 		goto close_fd;
-	}
 	if (cfg.raw_binary)
-		fmt = BINARY;
-
+		flags = BINARY;
 	if (cfg.human_readable)
-		flags |= HUMAN;
+		flags |= VERBOSE;
 
-	ret = nvme_sanitize_log(fd, &sanitize_log);
-	if (!ret) {
-		if (fmt == BINARY)
-			d_raw((unsigned char *)&sanitize_log, sizeof(sanitize_log));
-		else if (fmt == JSON)
-			json_sanitize_log(&sanitize_log, devicename);
-		else
-			show_sanitize_log(&sanitize_log, flags, devicename);
-	}
-	else if (ret > 0)
-		fprintf(stderr, "NVMe Status:%s(%x)\n", nvme_status_to_string(ret), ret);
+	err = nvme_sanitize_log(fd, &sanitize_log);
+	if (!err)
+		nvme_show_sanitize_log(&sanitize_log, devicename, flags);
+	else if (err > 0)
+		nvme_show_status(err);
 	else
 		perror("sanitize status log");
-
- close_fd:
+close_fd:
 	close(fd);
-
-	return ret;
+ret:
+	return nvme_status_to_errno(err, false);
 }
 
 static int list_ctrl(int argc, char **argv, struct command *cmd, struct plugin *plugin)
@@ -849,19 +1001,20 @@ static int list_ctrl(int argc, char **argv, struct command *cmd, struct plugin *
 		.cntid = 0,
 	};
 
-	const struct argconfig_commandline_options command_line_options[] = {
-		{"cntid",        'c', "NUM", CFG_SHORT,    &cfg.cntid,        required_argument, controller},
-		{"namespace-id", 'n', "NUM", CFG_POSITIVE, &cfg.namespace_id, required_argument, namespace_id},
-		{NULL}
+	OPT_ARGS(opts) = {
+		OPT_SHRT("cntid",       'c', &cfg.cntid,        controller),
+		OPT_UINT("namespace-id", 'n', &cfg.namespace_id, namespace_id),
+		OPT_END()
 	};
 
-	fd = parse_and_open(argc, argv, desc, command_line_options, &cfg, sizeof(cfg));
+	err = fd = parse_and_open(argc, argv, desc, opts);
 	if (fd < 0)
-		return fd;
+		goto ret;
 
 	if (posix_memalign((void *)&cntlist, getpagesize(), 0x1000)) {
 		fprintf(stderr, "can not allocate controller list payload\n");
-		return ENOMEM;
+		err = -ENOMEM;
+		goto close_fd;
 	}
 
 	err = nvme_identify_ctrl_list(fd, cfg.namespace_id, cfg.cntid, cntlist);
@@ -872,26 +1025,25 @@ static int list_ctrl(int argc, char **argv, struct command *cmd, struct plugin *
 			printf("[%4u]:%#x\n", i, le16_to_cpu(cntlist->identifier[i]));
 	}
 	else if (err > 0)
-		fprintf(stderr, "NVMe Status:%s(%x) cntid:%d\n",
-			nvme_status_to_string(err), err, cfg.cntid);
+		nvme_show_status(err);
 	else
 		perror("id controller list");
 
 	free(cntlist);
-
+close_fd:
 	close(fd);
-
-	return err;
+ret:
+	return nvme_status_to_errno(err, false);
 }
 
 static int list_ns(int argc, char **argv, struct command *cmd, struct plugin *plugin)
 {
-	const char *desc = "For the specified device, show the "\
-		"namespace list in a NVMe subsystem, optionally starting with a given namespace";
-	const char *namespace_id = "namespace number returned list should to start after";
+	const char *desc = "For the specified controller handle, show the "\
+		"namespace list in the associated NVMe subsystem, optionally starting with a given nsid.";
+	const char *namespace_id = "first nsid returned list should start from";
 	const char *all = "show all namespaces in the subsystem, whether attached or inactive";
 	int err, i, fd;
-	__u32 ns_list[1024] = {0};
+	__le32 ns_list[1024]={0};
 
 	struct config {
 		__u32 namespace_id;
@@ -899,34 +1051,39 @@ static int list_ns(int argc, char **argv, struct command *cmd, struct plugin *pl
 	};
 
 	struct config cfg = {
-		.namespace_id = 0,
+		.namespace_id = 1,
 	};
 
-	const struct argconfig_commandline_options command_line_options[] = {
-		{"namespace-id", 'n', "NUM", CFG_POSITIVE, &cfg.namespace_id, required_argument, namespace_id},
-		{"all",          'a', "",    CFG_NONE,     &cfg.all,          no_argument,       all},
-		{NULL}
+	OPT_ARGS(opts) = {
+		OPT_UINT("namespace-id", 'n', &cfg.namespace_id, namespace_id),
+		OPT_FLAG("all",          'a', &cfg.all,          all),
+		OPT_END()
 	};
 
-	fd = parse_and_open(argc, argv, desc, command_line_options, &cfg, sizeof(cfg));
+	err = fd = parse_and_open(argc, argv, desc, opts);
 	if (fd < 0)
-		return fd;
+		goto ret;
 
-	err = nvme_identify_ns_list(fd, cfg.namespace_id, !!cfg.all, ns_list);
+	if (!cfg.namespace_id) {
+		err = -EINVAL;
+		fprintf(stderr, "invalid nsid parameter\n");
+		goto close_fd;
+	}
+
+	err = nvme_identify_ns_list(fd, cfg.namespace_id - 1, !!cfg.all,
+				    ns_list);
 	if (!err) {
 		for (i = 0; i < 1024; i++)
 			if (ns_list[i])
-				printf("[%4u]:%#x\n", i, ns_list[i]);
-	}
-	else if (err > 0)
-		fprintf(stderr, "NVMe Status:%s(%x) NSID:%d\n",
-			nvme_status_to_string(err), err, cfg.namespace_id);
+				printf("[%4u]:%#x\n", i, le32_to_cpu(ns_list[i]));
+	} else if (err > 0)
+		nvme_show_status(err);
 	else
 		perror("id namespace list");
-
+close_fd:
 	close(fd);
-
-	return err;
+ret:
+	return nvme_status_to_errno(err, false);
 }
 
 static int delete_ns(int argc, char **argv, struct command *cmd, struct plugin *plugin)
@@ -938,46 +1095,54 @@ static int delete_ns(int argc, char **argv, struct command *cmd, struct plugin *
 		"becomes inactive when that namespace is detached or, if "\
 		"the namespace is not already inactive, once deleted.";
 	const char *namespace_id = "namespace to delete";
+	const char *timeout = "timeout value, in milliseconds";
 	int err, fd;
 
 	struct config {
 		__u32	namespace_id;
+		__u32	timeout;
 	};
 
 	struct config cfg = {
-		.namespace_id    = 0,
+		.namespace_id	= 0,
+		.timeout	= NVME_IOCTL_TIMEOUT,
 	};
 
-	const struct argconfig_commandline_options command_line_options[] = {
-		{"namespace-id", 'n', "NUM",  CFG_POSITIVE, &cfg.namespace_id,    required_argument, namespace_id},
-		{NULL}
+	OPT_ARGS(opts) = {
+		OPT_UINT("namespace-id", 'n', &cfg.namespace_id, namespace_id),
+		OPT_UINT("timeout",      't', &cfg.timeout,      timeout),
+		OPT_END()
 	};
 
-	fd = parse_and_open(argc, argv, desc, command_line_options, &cfg, sizeof(cfg));
+	err = fd = parse_and_open(argc, argv, desc, opts);
 	if (fd < 0)
-		return fd;
+		goto ret;
 
 	if (!cfg.namespace_id) {
-		fprintf(stderr, "%s: namespace-id parameter required\n",
-						cmd->name);
-		err = EINVAL;
-		goto close_fd;
+		cfg.namespace_id = nvme_get_nsid(fd);
+		if (cfg.namespace_id == 0) {
+			err = -EINVAL;
+			goto close_fd;
+		}
+		else if (cfg.namespace_id < 0) {
+			err = cfg.namespace_id;
+			goto close_fd;
+		}
 	}
 
-	err = nvme_ns_delete(fd, cfg.namespace_id);
+	err = nvme_ns_delete(fd, cfg.namespace_id, cfg.timeout);
 	if (!err)
 		printf("%s: Success, deleted nsid:%d\n", cmd->name,
 								cfg.namespace_id);
 	else if (err > 0)
-		fprintf(stderr, "NVMe Status:%s(%x)\n",
-					nvme_status_to_string(err), err);
+		nvme_show_status(err);
 	else
 		perror("delete namespace");
 
- close_fd:
+close_fd:
 	close(fd);
-
-	return err;
+ret:
+	return nvme_status_to_errno(err, false);
 }
 
 static int nvme_attach_ns(int argc, char **argv, int attach, const char *desc, struct command *cmd)
@@ -986,7 +1151,7 @@ static int nvme_attach_ns(int argc, char **argv, int attach, const char *desc, s
 	__u16 ctrlist[2048];
 
 	const char *namespace_id = "namespace to attach";
-	const char *cont = "optional comma-sep controllers list";
+	const char *cont = "optional comma-sep controller id list";
 
 	struct config {
 		char  *cntlist;
@@ -997,45 +1162,52 @@ static int nvme_attach_ns(int argc, char **argv, int attach, const char *desc, s
 		.cntlist = "",
 		.namespace_id = 0,
 	};
-	const struct argconfig_commandline_options command_line_options[] = {
-		{"namespace-id", 'n', "NUM",  CFG_POSITIVE, &cfg.namespace_id, required_argument, namespace_id},
-		{"controllers",  'c', "LIST", CFG_STRING,   &cfg.cntlist,      required_argument, cont},
-		{NULL}
+
+	OPT_ARGS(opts) = {
+		OPT_UINT("namespace-id", 'n', &cfg.namespace_id, namespace_id),
+		OPT_LIST("controllers",  'c', &cfg.cntlist,      cont),
+		OPT_END()
 	};
 
-	fd = parse_and_open(argc, argv, desc, command_line_options, &cfg, sizeof(cfg));
+	err = fd = parse_and_open(argc, argv, desc, opts);
 	if (fd < 0)
-		return fd;
+		goto ret;
 
 	if (!cfg.namespace_id) {
 		fprintf(stderr, "%s: namespace-id parameter required\n",
 						cmd->name);
-		err = EINVAL;
+		err = -EINVAL;
 		goto close_fd;
 	}
 
-	num = argconfig_parse_comma_sep_array(cfg.cntlist,
-					list, 2047);
+	num = argconfig_parse_comma_sep_array(cfg.cntlist, list, 2047);
+	if (!num) {
+		fprintf(stderr, "warning: empty controller-id list will result in no actual change in namespace attachment\n");
+	}
+
+	if (num == -1) {
+		fprintf(stderr, "%s: controller id list is malformed\n",
+						cmd->name);
+		err = -EINVAL;
+		goto close_fd;
+	}
+
 	for (i = 0; i < num; i++)
 		ctrlist[i] = (uint16_t)list[i];
 
-	if (attach)	
-		err = nvme_ns_attach_ctrls(fd, cfg.namespace_id, num, ctrlist);
-	else
-		err = nvme_ns_detach_ctrls(fd, cfg.namespace_id, num, ctrlist);
+	err = nvme_ns_attachment(fd, cfg.namespace_id, num, ctrlist, attach);
 
 	if (!err)
 		printf("%s: Success, nsid:%d\n", cmd->name, cfg.namespace_id);
 	else if (err > 0)
-		fprintf(stderr, "NVMe Status:%s(%x)\n",
-					nvme_status_to_string(err), err);
+		nvme_show_status(err);
 	else
 		perror(attach ? "attach namespace" : "detach namespace");
 
- close_fd:
+close_fd:
 	close(fd);
-
-	return err;
+ret:
+	return nvme_status_to_errno(err, false);
 }
 
 static int attach_ns(int argc, char **argv, struct command *cmd, struct plugin *plugin)
@@ -1069,8 +1241,13 @@ static int create_ns(int argc, char **argv, struct command *cmd, struct plugin *
 	const char *flbas = "FLBA size";
 	const char *dps = "data protection capabilities";
 	const char *nmic = "multipath and sharing capabilities";
+	const char *anagrpid = "ANA Group Identifier";
+	const char *nvmsetid = "NVM Set Identifier";
+	const char *timeout = "timeout value, in milliseconds";
+	const char *bs = "target block size";
 
-	int err = 0, fd;
+	int err = 0, fd, i;
+	struct nvme_id_ns ns;
 	__u32 nsid;
 
 	struct config {
@@ -1079,533 +1256,236 @@ static int create_ns(int argc, char **argv, struct command *cmd, struct plugin *
 		__u8	flbas;
 		__u8	dps;
 		__u8	nmic;
+		__u32	anagrpid;
+		__u16	nvmsetid;
+		__u64	bs;
+		__u32	timeout;
 	};
 
 	struct config cfg = {
+		.flbas		= 0xff,
+		.anagrpid	= 0,
+		.nvmsetid	= 0,
+		.bs		= 0x00,
+		.timeout	= NVME_IOCTL_TIMEOUT,
 	};
 
-	const struct argconfig_commandline_options command_line_options[] = {
-		{"nsze",  's', "NUM", CFG_LONG_SUFFIX, &cfg.nsze,  required_argument, nsze},
-		{"ncap",  'c', "NUM", CFG_LONG_SUFFIX, &cfg.ncap,  required_argument, ncap},
-		{"flbas", 'f', "NUM", CFG_BYTE,        &cfg.flbas, required_argument, flbas},
-		{"dps",   'd', "NUM", CFG_BYTE,        &cfg.dps,   required_argument, dps},
-		{"nmic",  'm', "NUM", CFG_BYTE,        &cfg.nmic,  required_argument, nmic},
-		{NULL}
+	OPT_ARGS(opts) = {
+		OPT_SUFFIX("nsze",       's', &cfg.nsze,     nsze),
+		OPT_SUFFIX("ncap",       'c', &cfg.ncap,     ncap),
+		OPT_BYTE("flbas",        'f', &cfg.flbas,    flbas),
+		OPT_BYTE("dps",          'd', &cfg.dps,      dps),
+		OPT_BYTE("nmic",         'm', &cfg.nmic,     nmic),
+		OPT_UINT("anagrp-id",	 'a', &cfg.anagrpid, anagrpid),
+		OPT_UINT("nvmset-id",	 'i', &cfg.nvmsetid, nvmsetid),
+		OPT_SUFFIX("block-size", 'b', &cfg.bs,       bs),
+		OPT_UINT("timeout",      't', &cfg.timeout,  timeout),
+		OPT_END()
 	};
 
-	fd = parse_and_open(argc, argv, desc, command_line_options, &cfg, sizeof(cfg));
+	err = fd = parse_and_open(argc, argv, desc, opts);
 	if (fd < 0)
-		return fd;
+		goto ret;
 
-	err = nvme_ns_create(fd, cfg.nsze, cfg.ncap, cfg.flbas, cfg.dps, cfg.nmic, &nsid);
+	if (cfg.flbas != 0xff && cfg.bs != 0x00) {
+		fprintf(stderr,
+			"Invalid specification of both FLBAS and Block Size, please specify only one\n");
+		err = -EINVAL;
+		goto close_fd;
+	}
+	if (cfg.bs) {
+		if ((cfg.bs & (~cfg.bs + 1)) != cfg.bs) {
+			fprintf(stderr,
+				"Invalid value for block size (%"PRIu64"). Block size must be a power of two\n",
+				(uint64_t)cfg.bs);
+			err = -EINVAL;
+			goto close_fd;
+		}
+		err = nvme_identify_ns(fd, NVME_NSID_ALL, 0, &ns);
+		if (err) {
+			if (err < 0)
+				perror("identify-namespace");
+			else {
+				fprintf(stderr, "identify failed\n");
+				nvme_show_status(err);
+			}
+			goto close_fd;
+		}
+		for (i = 0; i < 16; ++i) {
+			if ((1 << ns.lbaf[i].ds) == cfg.bs && ns.lbaf[i].ms == 0) {
+				cfg.flbas = i;
+				break;
+			}
+		}
+
+	}
+	if (cfg.flbas == 0xff) {
+		fprintf(stderr,
+			"FLBAS corresponding to block size %"PRIu64" not found\n",
+			(uint64_t)cfg.bs);
+		fprintf(stderr,
+			"Please correct block size, or specify FLBAS directly\n");
+
+		err = -EINVAL;
+		goto close_fd;
+	}
+
+	err = nvme_ns_create(fd, cfg.nsze, cfg.ncap, cfg.flbas, cfg.dps, cfg.nmic,
+			    cfg.anagrpid, cfg.nvmsetid, cfg.timeout, &nsid);
 	if (!err)
 		printf("%s: Success, created nsid:%d\n", cmd->name, nsid);
 	else if (err > 0)
-		fprintf(stderr, "NVMe Status:%s(%x)\n",
-					nvme_status_to_string(err), err);
+		nvme_show_status(err);
 	else
 		perror("create namespace");
 
-	close(fd);
-
-	return err;
-}
-
-static char *nvme_char_from_block(char *block)
-{
-	char slen[16];
-	unsigned len;
-
-	if (strncmp("nvme", block, 4)) {
-		fprintf(stderr, "Device %s is not a nvme device.", block);
-		return NULL;
-	}
-
-	sscanf(block, "nvme%d", &len);
-	sprintf(slen, "%d", len);
-	block[4 + strlen(slen)] = 0;
-
-	return block;
-}
-
-static void *get_registers(void)
-{
-	int fd;
-	char *base, path[512];
-	void *membase;
-
-	base = nvme_char_from_block((char *)devicename);
-	sprintf(path, "/sys/class/nvme/%s/device/resource0", base);
-	fd = open(path, O_RDONLY);
-	if (fd < 0) {
-		sprintf(path, "/sys/class/misc/%s/device/resource0", base);
-		fd = open(path, O_RDONLY);
-	}
-	if (fd < 0) {
-		fprintf(stderr, "%s did not find a pci resource\n", base);
-		return NULL;
-	}
-
-	membase = mmap(NULL, getpagesize(), PROT_READ, MAP_SHARED, fd, 0);
-	if (membase == MAP_FAILED) {
-		fprintf(stderr, "%s failed to map\n", base);
-		membase = NULL;
-	}
-
-	close(fd);
-	return membase;
-}
-
-static const char *subsys_dir = "/sys/class/nvme-subsystem/";
-
-static char *get_nvme_subsnqn(char *path)
-{
-	char sspath[319];
-	char *subsysnqn;
-	int fd;
-	int ret;
-
-	snprintf(sspath, sizeof(sspath), "%s/subsysnqn", path);
-
-	fd = open(sspath, O_RDONLY);
-	if (fd < 0)
-		return NULL;
-
-	subsysnqn = calloc(1, 256);
-	if (!subsysnqn)
-		goto close_fd;
-
-	ret = read(fd, subsysnqn, 256);
-	if (ret < 0) {
-		free(subsysnqn);
-		subsysnqn = NULL;
-	}
-
-	if (subsysnqn[strlen(subsysnqn) - 1] == '\n')
-		subsysnqn[strlen(subsysnqn) - 1] = '\0';
-
 close_fd:
 	close(fd);
-
-	return subsysnqn;
-}
-
-static char *get_nvme_ctrl_transport(char *path)
-{
-	char *trpath;
-	char *transport;
-	int fd;
-	ssize_t ret;
-
-	ret = asprintf(&trpath, "%s/transport", path);
-	if (ret < 0)
-		return NULL;
-
-	transport = calloc(1, 1024);
-	if (!transport)
-		goto err_free_trpath;
-
-	fd = open(trpath, O_RDONLY);
-	if (fd < 0)
-		goto err_free_tr;
-
-	ret = read(fd, transport, 1024);
-	if (ret < 0)
-		goto err_close_fd;
-
-	if (transport[strlen(transport) - 1] == '\n')
-		transport[strlen(transport) - 1] = '\0';
-
-	close(fd);
-	free(trpath);
-
-	return transport;
-
-err_close_fd:
-	close(fd);
-err_free_tr:
-	free(transport);
-err_free_trpath:
-	free(trpath);
-
-	return NULL;
-}
-
-static char *get_nvme_ctrl_address(char *path)
-{
-	char *addrpath;
-	char *address;
-	int fd;
-	ssize_t ret;
-	int i;
-
-	ret = asprintf(&addrpath, "%s/address", path);
-	if (ret < 0)
-		return NULL;
-
-	address = calloc(1, 1024);
-	if (!address)
-		goto err_free_addrpath;
-
-	fd = open(addrpath, O_RDONLY);
-	if (fd < 0)
-		goto err_free_addr;
-
-	ret = read(fd, address, 1024);
-	if (ret < 0)
-		goto err_close_fd;
-
-	if (address[strlen(address) - 1] == '\n')
-		address[strlen(address) - 1] = '\0';
-
-	for (i = 0; i < strlen(address); i++) {
-		if (address[i] == ',' )
-			address[i] = ' ';
-	}
-
-	close(fd);
-	free(addrpath);
-
-	return address;
-
-err_close_fd:
-	close(fd);
-err_free_addr:
-	free(address);
-err_free_addrpath:
-	free(addrpath);
-
-	return NULL;
-}
-static int scan_ctrls_filter(const struct dirent *d)
-{
-	int id, nsid;
-
-	if (d->d_name[0] == '.')
-		return 0;
-
-	if (strstr(d->d_name, "nvme")) {
-		if (sscanf(d->d_name, "nvme%dn%d", &id, &nsid) == 2)
-			return 0;
-		return 1;
-	}
-
-	return 0;
-}
-
-int get_nvme_subsystem_info(char *name, char *path,
-				struct subsys_list_item *item)
-{
-	char ctrl_path[512];
-	struct dirent **ctrls;
-	int n, i, ret = 1;
-
-	item->subsysnqn = get_nvme_subsnqn(path);
-	if (!item->subsysnqn) {
-		fprintf(stderr, "failed to get subsystem nqn.\n");
-		return ret;
-	}
-
-	item->name = strdup(name);
-
-	n = scandir(path, &ctrls, scan_ctrls_filter, alphasort);
-	if (n < 0) {
-		fprintf(stderr, "failed to scan controller(s).\n");
-		return ret;
-	}
-
-	item->ctrls = calloc(n, sizeof(struct ctrl_list_item));
-	if (!item->ctrls) {
-		fprintf(stderr, "failed to allocate subsystem controller(s)\n");
-		goto free_ctrls;
-	}
-
-	item->nctrls = n;
-
-	for (i = 0; i < n; i++) {
-		item->ctrls[i].name = strdup(ctrls[i]->d_name);
-
-		snprintf(ctrl_path, sizeof(ctrl_path), "%s/%s", path,
-			 item->ctrls[i].name);
-
-		item->ctrls[i].address = get_nvme_ctrl_address(ctrl_path);
-		if (!item->ctrls[i].address) {
-			fprintf(stderr, "failed to get controller[%d] address.\n", i);
-			goto free_ctrls;
-		}
-
-		item->ctrls[i].transport = get_nvme_ctrl_transport(ctrl_path);
-		if (!item->ctrls[i].transport) {
-			fprintf(stderr, "failed to get controller[%d] transport.\n", i);
-			goto free_ctrls;
-		}
-	}
-
-	ret = 0;
-
-free_ctrls:
-	for (i = 0; i < n; i++)
-		free(ctrls[i]);
-	free(ctrls);
-
-	return ret;
-
-}
-
-static int scan_subsys_filter(const struct dirent *d)
-{
-	char path[310];
-	struct stat ss;
-	int id;
-	int tmp;
-
-	if (d->d_name[0] == '.')
-		return 0;
-
-	/* sanity checking, probably unneeded */
-	if (strstr(d->d_name, "nvme-subsys")) {
-		snprintf(path, sizeof(path), "%s%s", subsys_dir, d->d_name);
-		if (stat(path, &ss))
-			return 0;
-		if (!S_ISDIR(ss.st_mode))
-			return 0;
-		tmp = sscanf(d->d_name, "nvme-subsys%d", &id);
-		if (tmp != 1)
-			return 0;
-		return 1;
-	}
-
-	return 0;
-}
-
-static void free_subsys_list_item(struct subsys_list_item *item)
-{
-	int i;
-
-	for (i = 0; i < item->nctrls; i++) {
-		free(item->ctrls[i].name);
-		free(item->ctrls[i].transport);
-		free(item->ctrls[i].address);
-	}
-
-	free(item->ctrls);
-	free(item->subsysnqn);
-	free(item->name);
-}
-
-static void free_subsys_list(struct subsys_list_item *slist, int n)
-{
-	int i;
-
-	for (i = 0; i < n; i++)
-		free_subsys_list_item(&slist[i]);
-
-	free(slist);
+ret:
+	return nvme_status_to_errno(err, false);
 }
 
 static int list_subsys(int argc, char **argv, struct command *cmd,
-		       struct plugin *plugin)
+		struct plugin *plugin)
 {
-	char path[310];
-	struct dirent **subsys;
-	struct subsys_list_item *slist;
-	int fmt, n, i, ret = 0;
+	struct nvme_topology t = { };
+	enum nvme_print_flags flags;
+	char *subsysnqn = NULL;
 	const char *desc = "Retrieve information for subsystems";
+	const char *verbose = "Increase output verbosity";
+	__u32 ns_instance = 0;
+	int err;
+
 	struct config {
 		char *output_format;
+		int verbose;
 	};
 
 	struct config cfg = {
 		.output_format = "normal",
+		.verbose = 0,
 	};
 
-	const struct argconfig_commandline_options opts[] = {
-		{"output-format", 'o', "FMT", CFG_STRING, &cfg.output_format,
-			required_argument, "Output Format: normal|json"},
-		{NULL}
+	OPT_ARGS(opts) = {
+		OPT_FMT("output-format", 'o', &cfg.output_format, output_format_no_binary),
+		OPT_FLAG("verbose",      'v', &cfg.verbose,       verbose),
+		OPT_END()
 	};
 
-	ret = argconfig_parse(argc, argv, desc, opts, &cfg, sizeof(cfg));
-	if (ret < 0)
-		return ret;
+	err = argconfig_parse(argc, argv, desc, opts);
+	if (err < 0)
+		goto ret;
 
-	fmt = validate_output_format(cfg.output_format);
+	devicename = NULL;
+	if (optind < argc) {
+		char path[512];
+		int id;
 
-	if (fmt != JSON && fmt != NORMAL)
-		return -EINVAL;
-	n = scandir(subsys_dir, &subsys, scan_subsys_filter, alphasort);
-	if (n < 0) {
-		fprintf(stderr, "no NVMe subsystem(s) detected.\n");
-		return n;
+		devicename = basename(argv[optind]);
+		if (sscanf(devicename, "nvme%dn%d", &id, &ns_instance) != 2) {
+			fprintf(stderr, "%s is not a NVMe namespace device\n",
+				argv[optind]);
+			err = -EINVAL;
+			goto ret;
+		}
+		sprintf(path, "/sys/block/%s/device", devicename);
+		subsysnqn = get_nvme_subsnqn(path);
+		if (!subsysnqn) {
+			fprintf(stderr, "Cannot read subsys NQN from %s\n",
+				devicename);
+			err = -EINVAL;
+			goto ret;
+		}
+		optind++;
 	}
 
-	slist = calloc(n, sizeof(struct subsys_list_item));
-	if (!slist) {
-		ret = ENOMEM;
-		goto free_subsys;
+	err = flags = validate_output_format(cfg.output_format);
+	if (flags < 0)
+		goto free;
+	if (flags != JSON && flags != NORMAL) {
+		err = -EINVAL;
+		goto free;
 	}
+	if (cfg.verbose)
+		flags |= VERBOSE;
 
-	for (i = 0; i < n; i++) {
-		snprintf(path, sizeof(path), "%s%s", subsys_dir,
-			subsys[i]->d_name);
-		ret = get_nvme_subsystem_info(subsys[i]->d_name, path, &slist[i]);
-		if (ret)
-			goto free_subsys;
+	err = scan_subsystems(&t, subsysnqn, ns_instance);
+	if (err) {
+		fprintf(stderr, "Failed to scan namespaces\n");
+		goto free;
 	}
-
-	if (fmt == JSON)
-		json_print_nvme_subsystem_list(slist, n);
-	else
-		show_nvme_subsystem_list(slist, n);
-
-free_subsys:
-	free_subsys_list(slist, n);
-
-	for (i = 0; i < n; i++)
-		free(subsys[i]);
-	free(subsys);
-
-	return ret;
-}
-
-int get_nvme_info(int fd, struct list_item *item, const char *node)
-{
-	int err;
-
-	err = nvme_identify_ctrl(fd, &item->ctrl);
-	if (err)
-		return err;
-	item->nsid = nvme_get_nsid(fd);
-	if (item->nsid <= 0)
-		return item->nsid;
-	err = nvme_identify_ns(fd, item->nsid,
-			       0, &item->ns);
-	if (err)
-		return err;
-	strcpy(item->node, node);
-	item->block = is_blk();
-	return 0;
-}
-
-static const char *dev = "/dev/";
-
-/* Assume every block device starting with /dev/nvme is an nvme namespace */
-static int scan_dev_filter(const struct dirent *d)
-{
-	char path[264];
-	struct stat bd;
-	int ctrl, ns, part;
-
-	if (d->d_name[0] == '.')
-		return 0;
-
-	if (strstr(d->d_name, "nvme")) {
-		snprintf(path, sizeof(path), "%s%s", dev, d->d_name);
-		if (stat(path, &bd))
-			return 0;
-		if (!S_ISBLK(bd.st_mode))
-			return 0;
-		if (sscanf(d->d_name, "nvme%dn%dp%d", &ctrl, &ns, &part) == 3)
-			return 0;
-		return 1;
-	}
-	return 0;
+	nvme_show_subsystem_list(&t, flags);
+free:
+	free_topology(&t);
+	if (subsysnqn)
+		free(subsysnqn);
+ret:
+	return nvme_status_to_errno(err, false);
 }
 
 static int list(int argc, char **argv, struct command *cmd, struct plugin *plugin)
 {
-	char path[264];
-	struct dirent **devices;
-	struct list_item *list_items;
-	unsigned int i, n;
-	int fmt, ret, fd;
-	const char *desc = "Retrieve basic information for the given device";
+	const char *desc = "Retrieve basic information for all NVMe namespaces";
+	const char *verbose = "Increase output verbosity";
+	struct nvme_topology t = { };
+	enum nvme_print_flags flags;
+	int err = 0;
+
 	struct config {
 		char *output_format;
+		int verbose;
 	};
 
 	struct config cfg = {
 		.output_format = "normal",
+		.verbose = 0,
 	};
 
-	const struct argconfig_commandline_options opts[] = {
-		{"output-format", 'o', "FMT", CFG_STRING, &cfg.output_format, required_argument, "Output Format: normal|json"},
-		{NULL}
+	OPT_ARGS(opts) = {
+		OPT_FMT("output-format", 'o', &cfg.output_format, output_format_no_binary),
+		OPT_FLAG("verbose",      'v', &cfg.verbose,       verbose),
+		OPT_END()
 	};
 
-	ret = argconfig_parse(argc, argv, desc, opts, &cfg, sizeof(cfg));
-	if (ret < 0)
-		return ret;
+	err = argconfig_parse(argc, argv, desc, opts);
+	if (err < 0)
+		return err;
 
-	fmt = validate_output_format(cfg.output_format);
-
-	if (fmt != JSON && fmt != NORMAL)
+	err = flags = validate_output_format(cfg.output_format);
+	if (flags < 0)
+		return err;
+	if (flags != JSON && flags != NORMAL) {
+		fprintf(stderr, "Invalid output format\n");
 		return -EINVAL;
+	}
+	if (cfg.verbose)
+		flags |= VERBOSE;
 
-	n = scandir(dev, &devices, scan_dev_filter, alphasort);
-	if (n < 0) {
-		fprintf(stderr, "no NVMe device(s) detected.\n");
-		return n;
+	err = scan_subsystems(&t, NULL, 0);
+	if (err) {
+		fprintf(stderr, "Failed to scan namespaces\n");
+		return err;
 	}
 
-	list_items = calloc(n, sizeof(*list_items));
-	if (!list_items) {
-		fprintf(stderr, "can not allocate controller list payload\n");
-		return ENOMEM;
-	}
-
-	for (i = 0; i < n; i++) {
-		snprintf(path, sizeof(path), "%s%s", dev, devices[i]->d_name);
-		fd = open_dev(path);
-		if (fd < 0) {
-			fprintf(stderr, "can not open %s: %s\n", path,
-					strerror(errno));
-			return errno;
-		}
-		ret = get_nvme_info(fd, &list_items[i], path);
-		close(fd);
-		if (ret)
-			return ret;
-	}
-
-	if (fmt == JSON)
-		json_print_list_items(list_items, n);
-	else
-		show_list_items(list_items, n);
-
-	for (i = 0; i < n; i++)
-		free(devices[i]);
-	free(devices);
-	free(list_items);
-
+	nvme_show_list_items(&t, flags);
+	free_topology(&t);
 	return 0;
 }
 
-static int get_nsid(int fd)
-{
-	int nsid = nvme_get_nsid(fd);
-
-	if (nsid <= 0) {
-		fprintf(stderr,
-			"%s: failed to return namespace id\n",
-			devicename);
-	}
-	return nsid;
-}
-
-int __id_ctrl(int argc, char **argv, struct command *cmd, struct plugin *plugin, void (*vs)(__u8 *vs, struct json_object *root))
+int __id_ctrl(int argc, char **argv, struct command *cmd, struct plugin *plugin,
+		void (*vs)(__u8 *vs, struct json_object *root))
 {
 	const char *desc = "Send an Identify Controller command to "\
 		"the given device and report information about the specified "\
 		"controller in human-readable or "\
 		"binary format. May also return vendor-specific "\
 		"controller attributes in hex-dump if requested.";
-	const char *vendor_specific = "dump binary vendor infos";
-	const char *raw_binary = "show infos in binary format";
-	const char *human_readable = "show infos in readable format";
-	int err, fmt, fd;
-	unsigned int flags = 0;
+	const char *vendor_specific = "dump binary vendor field";
+	const char *raw = "show identify in binary format";
+	const char *human_readable = "show identify in readable format";
+	enum nvme_print_flags flags;
 	struct nvme_id_ctrl ctrl;
+	int err, fd;
 
 	struct config {
 		int vendor_specific;
@@ -1618,54 +1498,39 @@ int __id_ctrl(int argc, char **argv, struct command *cmd, struct plugin *plugin,
 		.output_format = "normal",
 	};
 
-	const struct argconfig_commandline_options command_line_options[] = {
-		{"vendor-specific", 'v', "",    CFG_NONE,   &cfg.vendor_specific, no_argument,       vendor_specific},
-		{"raw-binary",      'b', "",    CFG_NONE,   &cfg.raw_binary,      no_argument,       raw_binary},
-		{"human-readable",  'H', "",    CFG_NONE,   &cfg.human_readable,  no_argument,       human_readable},
-		{"output-format",   'o', "FMT", CFG_STRING, &cfg.output_format,   required_argument, output_format },
-		{NULL}
+	OPT_ARGS(opts) = {
+		OPT_FLAG("vendor-specific", 'v', &cfg.vendor_specific, vendor_specific),
+		OPT_FMT("output-format",    'o', &cfg.output_format,   output_format),
+		OPT_FLAG("raw-binary",      'b', &cfg.raw_binary,      raw),
+		OPT_FLAG("human-readable",  'H', &cfg.human_readable,  human_readable),
+		OPT_END()
 	};
 
-	fd = parse_and_open(argc, argv, desc, command_line_options, &cfg, sizeof(cfg));
+	err = fd = parse_and_open(argc, argv, desc, opts);
 	if (fd < 0)
-		return fd;
+		goto ret;
 
-	fmt = validate_output_format(cfg.output_format);
-	if (fmt < 0) {
-		err = fmt;
+	err = flags = validate_output_format(cfg.output_format);
+	if (flags < 0)
 		goto close_fd;
-	}
-	if (cfg.raw_binary) {
-		fprintf(stderr, "binary output\n");
-		fmt = BINARY;
-	}
-
+	if (cfg.raw_binary)
+		flags = BINARY;
 	if (cfg.vendor_specific)
 		flags |= VS;
 	if (cfg.human_readable)
-		flags |= HUMAN;
+		flags |= VERBOSE;
 
 	err = nvme_identify_ctrl(fd, &ctrl);
-	if (!err) {
-		if (fmt == BINARY)
-			d_raw((unsigned char *)&ctrl, sizeof(ctrl));
-		else if (fmt == JSON)
-			json_nvme_id_ctrl(&ctrl, flags, vs);
-		else {
-			printf("NVME Identify Controller:\n");
-			__show_nvme_id_ctrl(&ctrl, flags, vs);
-		}
-	}
+	if (!err)
+		__nvme_show_id_ctrl(&ctrl, flags, vs);
 	else if (err > 0)
-		fprintf(stderr, "NVMe Status:%s(%x)\n",
-				nvme_status_to_string(err), err);
+		nvme_show_status(err);
 	else
 		perror("identify controller");
-
- close_fd:
+close_fd:
 	close(fd);
-
-	return err;
+ret:
+	return nvme_status_to_errno(err, false);
 }
 
 static int id_ctrl(int argc, char **argv, struct command *cmd, struct plugin *plugin)
@@ -1676,12 +1541,14 @@ static int id_ctrl(int argc, char **argv, struct command *cmd, struct plugin *pl
 static int ns_descs(int argc, char **argv, struct command *cmd, struct plugin *plugin)
 {
 	const char *desc = "Send Namespace Identification Descriptors command to the "\
-			    "given device, returns the namespace identifcation descriptors "\
+			    "given device, returns the namespace identification descriptors "\
 			    "of the specific namespace in either human-readable or binary format.";
-	const char *raw_binary = "show infos in binary format";
+	const char *raw = "show descriptors in binary format";
 	const char *namespace_id = "identifier of desired namespace";
-	int err, fmt, fd;
+	enum nvme_print_flags flags;
+	int err, fd;
 	void *nsdescs;
+
 	struct config {
 		__u32 namespace_id;
 		int raw_binary;
@@ -1693,59 +1560,49 @@ static int ns_descs(int argc, char **argv, struct command *cmd, struct plugin *p
 		.output_format = "normal",
 	};
 
-	const struct argconfig_commandline_options command_line_options[] = {
-		{"namespace-id",    'n', "NUM", CFG_POSITIVE, &cfg.namespace_id, required_argument, namespace_id},
-		{"raw-binary",      'b', "",    CFG_NONE,     &cfg.raw_binary,      no_argument,       raw_binary},
-		{"output-format",   'o', "FMT", CFG_STRING,   &cfg.output_format,   required_argument, output_format },
-		{NULL}
+	OPT_ARGS(opts) = {
+		OPT_UINT("namespace-id",  'n', &cfg.namespace_id,  namespace_id),
+		OPT_FMT("output-format",  'o', &cfg.output_format, output_format),
+		OPT_FLAG("raw-binary",    'b', &cfg.raw_binary,    raw),
+		OPT_END()
 	};
 
-	fd = parse_and_open(argc, argv, desc, command_line_options, &cfg, sizeof(cfg));
+	err = fd = parse_and_open(argc, argv, desc, opts);
 	if (fd < 0)
-		return fd;
+		goto ret;
 
-	fmt = validate_output_format(cfg.output_format);
-	if (fmt < 0) {
-		err = fmt;
+	err = flags = validate_output_format(cfg.output_format);
+	if (flags < 0)
 		goto close_fd;
-	}
 	if (cfg.raw_binary)
-		fmt = BINARY;
+		flags = BINARY;
+
 	if (!cfg.namespace_id) {
-		cfg.namespace_id = get_nsid(fd);
-		if (cfg.namespace_id <= 0)
-			return EINVAL;
+		cfg.namespace_id = nvme_get_nsid(fd);
+		if (cfg.namespace_id < 0) {
+			err = cfg.namespace_id;
+			goto close_fd;
+		}
 	}
 
 	if (posix_memalign(&nsdescs, getpagesize(), 0x1000)) {
 		fprintf(stderr, "can not allocate controller list payload\n");
-		err = ENOMEM;
+		err = -ENOMEM;
 		goto close_fd;
 	}
 
 	err = nvme_identify_ns_descs(fd, cfg.namespace_id, nsdescs);
-	if (!err) {
-		if (fmt == BINARY)
-			d_raw((unsigned char *)nsdescs, 0x1000);
-		else if (fmt == JSON)
-			json_nvme_id_ns_descs(nsdescs);
-		else {
-			printf("NVME Namespace Identification Descriptors NS %d:\n", cfg.namespace_id);
-			show_nvme_id_ns_descs(nsdescs);
-		}
-	}
+	if (!err)
+		nvme_show_id_ns_descs(nsdescs, cfg.namespace_id, flags);
 	else if (err > 0)
-		fprintf(stderr, "NVMe Status:%s(%x) NSID:%d\n",
-			nvme_status_to_string(err), err, cfg.namespace_id);
+		nvme_show_status(err);
 	else
 		perror("identify namespace");
-
 	free(nsdescs);
-
- close_fd:
+close_fd:
 	close(fd);
-
-	return err;
+ret:
+	return nvme_status_to_errno(err, false);
 }
 
 static int id_ns(int argc, char **argv, struct command *cmd, struct plugin *plugin)
@@ -1755,13 +1612,14 @@ static int id_ns(int argc, char **argv, struct command *cmd, struct plugin *plug
 		"in either human-readable or binary format. Can also return "\
 		"binary vendor-specific namespace attributes.";
 	const char *force = "Return this namespace, even if not attaced (1.2 devices only)";
-	const char *vendor_specific = "dump binary vendor infos";
-	const char *raw_binary = "show infos in binary format";
-	const char *human_readable = "show infos in readable format";
+	const char *vendor_specific = "dump binary vendor fields";
+	const char *raw = "show identify in binary format";
+	const char *human_readable = "show identify in readable format";
 	const char *namespace_id = "identifier of desired namespace";
+
+	enum nvme_print_flags flags;
 	struct nvme_id_ns ns;
-	int err, fmt, fd;
-	unsigned int flags = 0;
+	int err, fd;
 
 	struct config {
 		__u32 namespace_id;
@@ -1777,86 +1635,476 @@ static int id_ns(int argc, char **argv, struct command *cmd, struct plugin *plug
 		.output_format = "normal",
 	};
 
-	const struct argconfig_commandline_options command_line_options[] = {
-		{"namespace-id",    'n', "NUM", CFG_POSITIVE, &cfg.namespace_id,    required_argument, namespace_id},
-		{"force",           'f', "",    CFG_NONE,     &cfg.force,           no_argument,       force},
-		{"vendor-specific", 'v', "",    CFG_NONE,     &cfg.vendor_specific, no_argument,       vendor_specific},
-		{"raw-binary",      'b', "",    CFG_NONE,     &cfg.raw_binary,      no_argument,       raw_binary},
-		{"human-readable",  'H', "",    CFG_NONE,     &cfg.human_readable,  no_argument,       human_readable},
-		{"output-format",   'o', "FMT", CFG_STRING,   &cfg.output_format,   required_argument, output_format },
-		{NULL}
+	OPT_ARGS(opts) = {
+		OPT_UINT("namespace-id",    'n', &cfg.namespace_id,    namespace_id),
+		OPT_FLAG("force",           'f', &cfg.force,           force),
+		OPT_FLAG("vendor-specific", 'v', &cfg.vendor_specific, vendor_specific),
+		OPT_FLAG("raw-binary",      'b', &cfg.raw_binary,      raw),
+		OPT_FMT("output-format",    'o', &cfg.output_format,   output_format),
+		OPT_FLAG("human-readable",  'H', &cfg.human_readable,  human_readable),
+		OPT_END()
 	};
 
-	fd = parse_and_open(argc, argv, desc, command_line_options, &cfg, sizeof(cfg));
+	err = fd = parse_and_open(argc, argv, desc, opts);
 	if (fd < 0)
-		return fd;
+		goto ret;
 
-	fmt = validate_output_format(cfg.output_format);
-	if (fmt < 0) {
-		err = fmt;
+	err = flags = validate_output_format(cfg.output_format);
+	if (flags < 0)
 		goto close_fd;
-	}
-
 	if (cfg.raw_binary)
-		fmt = BINARY;
+		flags = BINARY;
 	if (cfg.vendor_specific)
 		flags |= VS;
 	if (cfg.human_readable)
-		flags |= HUMAN;
-	if (!cfg.namespace_id && is_blk()) {
-		cfg.namespace_id = get_nsid(fd);
-		if (cfg.namespace_id <= 0)
-			return EINVAL;
-	}
-	else if(!cfg.namespace_id)
-		fprintf(stderr,
-			"Error: requesting namespace-id from non-block device\n");
+		flags |= VERBOSE;
 
-	err = nvme_identify_ns(fd, cfg.namespace_id, cfg.force, &ns);
-	if (!err) {
-		if (fmt == BINARY)
-			d_raw((unsigned char *)&ns, sizeof(ns));
-		else if (fmt == JSON)
-			json_nvme_id_ns(&ns, flags);
-		else {
-			printf("NVME Identify Namespace %d:\n", cfg.namespace_id);
-			show_nvme_id_ns(&ns, flags);
+	if (!cfg.namespace_id) {
+		cfg.namespace_id = nvme_get_nsid(fd);
+		if (cfg.namespace_id < 0) {
+			err = cfg.namespace_id;
+			goto close_fd;
+		}
+		else if (!cfg.namespace_id) {
+			fprintf(stderr,
+				"Error: requesting namespace-id from non-block device\n");
+			err = -ENOTBLK;
+			goto close_fd;
 		}
 	}
+
+	err = nvme_identify_ns(fd, cfg.namespace_id, cfg.force, &ns);
+	if (!err)
+		nvme_show_id_ns(&ns, cfg.namespace_id, flags);
 	else if (err > 0)
-		fprintf(stderr, "NVMe Status:%s(%x) NSID:%d\n",
-			nvme_status_to_string(err), err, cfg.namespace_id);
+		nvme_show_status(err);
 	else
 		perror("identify namespace");
-
- close_fd:
+close_fd:
 	close(fd);
+ret:
+	return nvme_status_to_errno(err, false);
+}
 
+static int id_ns_granularity(int argc, char **argv, struct command *cmd, struct plugin *plugin)
+{
+	const char *desc = "Send an Identify Namespace Granularity List command to the "\
+		"given device, returns namespace granularity list "\
+		"in either human-readable or binary format.";
+
+	struct nvme_id_ns_granularity_list *granularity_list;
+	enum nvme_print_flags flags;
+	int err, fd;
+
+	struct config {
+		char *output_format;
+	};
+
+	struct config cfg = {
+		.output_format = "normal",
+	};
+
+	OPT_ARGS(opts) = {
+		OPT_FMT("output-format", 'o', &cfg.output_format, output_format),
+		OPT_END()
+	};
+
+	err = fd = parse_and_open(argc, argv, desc, opts);
+	if (fd < 0)
+		goto ret;
+
+	err = flags = validate_output_format(cfg.output_format);
+	if (flags < 0)
+		goto close_fd;
+
+	if (posix_memalign((void *)&granularity_list, getpagesize(), NVME_IDENTIFY_DATA_SIZE)) {
+		fprintf(stderr, "can not allocate granularity list payload\n");
+		err = -ENOMEM;
+		goto close_fd;
+	}
+
+	err = nvme_identify_ns_granularity(fd, granularity_list);
+	if (!err)
+		nvme_show_id_ns_granularity_list(granularity_list, flags);
+	else if (err > 0)
+		nvme_show_status(err);
+	else
+		perror("identify namespace granularity");
+
+close_fd:
+	close(fd);
+ret:
+	return nvme_status_to_errno(err, false);
+}
+
+
+static int id_nvmset(int argc, char **argv, struct command *cmd, struct plugin *plugin)
+{
+	const char *desc = "Send an Identify NVM Set List command to the "\
+		"given device, returns entries for NVM Set identifiers greater "\
+		"than or equal to the value specified CDW11.NVMSETID "\
+		"in either binary format or json format";
+	const char *nvmset_id = "NVM Set Identify value";
+
+	struct nvme_id_nvmset nvmset;
+	enum nvme_print_flags flags;
+	int err, fd;
+
+	struct config {
+		__u16 nvmset_id;
+		char *output_format;
+	};
+
+	struct config cfg = {
+		.nvmset_id = 0,
+		.output_format = "normal",
+	};
+
+	OPT_ARGS(opts) = {
+		OPT_UINT("nvmset_id",    'i', &cfg.nvmset_id,     nvmset_id),
+		OPT_FMT("output-format", 'o', &cfg.output_format, output_format),
+		OPT_END()
+	};
+
+	err = fd = parse_and_open(argc, argv, desc, opts);
+	if (fd < 0)
+		goto ret;
+
+	err = flags = validate_output_format(cfg.output_format);
+	if (flags < 0)
+		goto close_fd;
+
+	err = nvme_identify_nvmset(fd, cfg.nvmset_id, &nvmset);
+	if (!err)
+		nvme_show_id_nvmset(&nvmset, cfg.nvmset_id, flags);
+	else if (err > 0)
+		nvme_show_status(err);
+	else
+		perror("identify nvm set list");
+
+close_fd:
+	close(fd);
+ret:
+	return nvme_status_to_errno(err, false);
+}
+
+static int id_uuid(int argc, char **argv, struct command *cmd, struct plugin *plugin)
+{
+	const char *desc = "Send an Identify UUID List command to the "\
+		"given device, returns list of supported Vendor Specific UUIDs "\
+		"in either human-readable or binary format.";
+	const char *raw = "show uuid in binary format";
+	const char *human_readable = "show uuid in readable format";
+
+	struct nvme_id_uuid_list uuid_list;
+	enum nvme_print_flags flags;
+	int err, fd;
+
+	struct config {
+		int   raw_binary;
+		int   human_readable;
+		char *output_format;
+	};
+
+	struct config cfg = {
+		.output_format = "normal",
+	};
+
+	OPT_ARGS(opts) = {
+		OPT_FMT("output-format",   'o', &cfg.output_format,  output_format),
+		OPT_FLAG("raw-binary",     'b', &cfg.raw_binary,     raw),
+		OPT_FLAG("human-readable", 'H', &cfg.human_readable, human_readable),
+		OPT_END()
+	};
+
+	fd = parse_and_open(argc, argv, desc, opts);
+	if (fd < 0)
+		return fd;
+
+	err = flags = validate_output_format(cfg.output_format);
+	if (flags < 0)
+		goto close_fd;
+	if (cfg.raw_binary)
+		flags = BINARY;
+	if (cfg.human_readable)
+		flags |= VERBOSE;
+
+	err = nvme_identify_uuid(fd, &uuid_list);
+	if (!err)
+		nvme_show_id_uuid_list(&uuid_list, flags);
+	else if (err > 0)
+		nvme_show_status(err);
+	else
+		perror("identify UUID list");
+close_fd:
+	close(fd);
 	return err;
 }
 
 static int get_ns_id(int argc, char **argv, struct command *cmd, struct plugin *plugin)
 {
-	int nsid, fd;
+	int err = 0, nsid, fd;
 	const char *desc = "Get namespce ID of a the block device.";
 
-	const struct argconfig_commandline_options command_line_options[] = {
-		{NULL},
+	OPT_ARGS(opts) = {
+		OPT_END()
 	};
 
-	fd = parse_and_open(argc, argv, desc, command_line_options, NULL, 0);
+	err = fd = parse_and_open(argc, argv, desc, opts);
 	if (fd < 0)
-		return fd;
+		goto ret;
+
 	nsid = nvme_get_nsid(fd);
 	if (nsid <= 0) {
 		perror(devicename);
-		close(fd);
-		return errno;
+		err = errno;
+		goto close_fd;
 	}
+	err = 0;
 	printf("%s: namespace-id:%d\n", devicename, nsid);
 
+close_fd:
 	close(fd);
-	return 0;
+ret:
+	return nvme_status_to_errno(err, false);
+}
+
+static int virtual_mgmt(int argc, char **argv, struct command *cmd, struct plugin *plugin)
+{
+	const char *desc  = "The Virtualization Management command is supported by primary controllers "\
+		"that support the Virtualization Enhancements capability. This command is used for:\n"\
+		"  1. Modifying Flexible Resource allocation for the primary controller\n"\
+		"  2. Assigning Flexible Resources for secondary controllers\n"\
+		"  3. Setting the Online and Offline state for secondary controllers";
+	const char *cntlid = "Controller Identifier(CNTLID)";
+	const char *rt = "Resource Type(RT): [0,1]\n"\
+		"0h: VQ Resources\n"\
+		"1h: VI Resources";
+	const char *act = "Action(ACT): [1,7,8,9]\n"\
+		"1h: Primary Flexible\n"\
+		"7h: Secondary Offline\n"\
+		"8h: Secondary Assign\n"\
+		"9h: Secondary Online";
+	const char *nr = "Number of Controller Resources(NR)";
+	int fd, err;
+	__u32 result;
+
+	struct config {
+		int     cntlid;
+		int     rt;
+		int     act;
+		__u32   cdw10;
+		__u32   cdw11;
+	};
+
+	struct config cfg = {
+		.cntlid	  = 0,
+		.rt	  = 0,
+		.act	  = 0,
+		.cdw10	  = 0,
+		.cdw11	  = 0,
+	};
+
+	OPT_ARGS(opts) = {
+		OPT_UINT("cntlid", 'c', &cfg.cntlid, cntlid),
+		OPT_UINT("rt",     'r', &cfg.rt,     rt),
+		OPT_UINT("act",    'a', &cfg.act,    act),
+		OPT_UINT("nr",     'n', &cfg.cdw11,  nr),
+		OPT_END()
+	};
+
+	err = fd = parse_and_open(argc, argv, desc, opts);
+	if (fd < 0)
+		goto ret;
+
+	cfg.cdw10 = cfg.cntlid << 16;
+	cfg.cdw10 = cfg.cdw10 | (cfg.rt << 8);
+	cfg.cdw10 = cfg.cdw10 | cfg.act;
+
+	err = nvme_virtual_mgmt(fd, cfg.cdw10, cfg.cdw11, &result);
+	if (!err) {
+		printf("success, Number of Resources allocated:%#x\n", result);
+	} else if (err > 0) {
+		nvme_show_status(err);
+	} else
+		perror("virt-mgmt");
+
+	close(fd);
+ret:
+	return nvme_status_to_errno(err, false);
+}
+
+static int list_secondary_ctrl(int argc, char **argv, struct command *cmd, struct plugin *plugin)
+{
+	const char *desc = "Show secondary controller list associated with the primary controller "\
+		"of the given device.";
+	const char *controller = "lowest controller identifier to display";
+	const char *namespace_id = "optional namespace attached to controller";
+	const char *num_entries = "number of entries to retrieve";
+
+	struct nvme_secondary_controllers_list *sc_list;
+	enum nvme_print_flags flags;
+	int err, fd;
+
+	struct config {
+		__u16 cntid;
+		__u32 num_entries;
+		__u32 namespace_id;
+		char *output_format;
+	};
+
+	struct config cfg = {
+		.cntid = 0,
+		.namespace_id = 0,
+		.output_format = "normal",
+		.num_entries = ARRAY_SIZE(sc_list->sc_entry),
+	};
+
+	OPT_ARGS(opts) = {
+		OPT_SHRT("cntid",        'c', &cfg.cntid,         controller),
+		OPT_UINT("namespace-id", 'n', &cfg.namespace_id,  namespace_id),
+		OPT_UINT("num-entries",  'e', &cfg.num_entries,   num_entries),
+		OPT_FMT("output-format", 'o', &cfg.output_format, output_format),
+		OPT_END()
+	};
+
+	err = fd = parse_and_open(argc, argv, desc, opts);
+	if (fd < 0)
+		goto ret;
+
+	err = flags = validate_output_format(cfg.output_format);
+	if (flags < 0)
+		goto close_fd;
+
+	if (!cfg.num_entries) {
+		fprintf(stderr, "non-zero num-entries is required param\n");
+		err = -EINVAL;
+		goto close_fd;
+	}
+
+	if (posix_memalign((void *)&sc_list, getpagesize(), sizeof(*sc_list))) {
+		fprintf(stderr, "can not allocate controller list payload\n");
+		err = -ENOMEM;
+		goto close_fd;
+	}
+
+	err = nvme_identify_secondary_ctrl_list(fd, cfg.namespace_id, cfg.cntid, sc_list);
+	if (!err)
+		nvme_show_list_secondary_ctrl(sc_list, cfg.num_entries, flags);
+	else if (err > 0)
+		nvme_show_status(err);
+	else
+		perror("id secondary controller list");
+
+	free(sc_list);
+
+close_fd:
+	close(fd);
+ret:
+	return nvme_status_to_errno(err, false);
+}
+
+static int device_self_test(int argc, char **argv, struct command *cmd, struct plugin *plugin)
+{
+	const char *desc  = "Implementing the device self-test feature"\
+		" which provides the necessary log to determine the state of the device";
+	const char *namespace_id = "Indicate the namespace in which the device self-test"\
+		" has to be carried out";
+	const char * self_test_code = "This field specifies the action taken by the device self-test command : "\
+		"\n1h Start a short device self-test operation\n"\
+		"2h Start a extended device self-test operation\n"\
+		"eh Start a vendor specific device self-test operation\n"\
+		"fh abort the device self-test operation\n";
+	int fd, err;
+
+	struct config {
+		__u32 namespace_id;
+		__u32 cdw10;
+	};
+
+	struct config cfg = {
+		.namespace_id  = NVME_NSID_ALL,
+		.cdw10         = 0,
+	};
+
+	OPT_ARGS(opts) = {
+		OPT_UINT("namespace-id",   'n', &cfg.namespace_id, namespace_id),
+		OPT_UINT("self-test-code", 's', &cfg.cdw10,        self_test_code),
+		OPT_END()
+	};
+
+	err = fd = parse_and_open(argc, argv, desc, opts);
+	if (fd < 0)
+		goto ret;
+
+	err = nvme_self_test_start(fd, cfg.namespace_id, cfg.cdw10);
+	if (!err) {
+		if ((cfg.cdw10 & 0xf) == 0xf)
+			printf("Aborting device self-test operation\n");
+		else
+			printf("Device self-test started\n");
+	} else if (err > 0) {
+		nvme_show_status(err);
+	} else
+		perror("Device self-test");
+
+	close(fd);
+ret:
+	return nvme_status_to_errno(err, false);
+}
+
+static int self_test_log(int argc, char **argv, struct command *cmd, struct plugin *plugin)
+{
+	const char *desc = "Retrieve the self-test log for the given device and given test "\
+			"(or optionally a namespace) in either decoded format "\
+			"(default) or binary.";
+	const char *namespace_id = "Indicate the namespace from which the self-test "\
+				    "log has to be obtained";
+	const char *verbose = "Increase output verbosity";
+
+	struct nvme_self_test_log self_test_log;
+	enum nvme_print_flags flags;
+	int err, fd;
+
+	struct config {
+		__u32 namespace_id;
+		char *output_format;
+		int verbose;
+	};
+
+	struct config cfg = {
+		.namespace_id = NVME_NSID_ALL,
+		.output_format = "normal",
+	};
+
+	OPT_ARGS(opts) = {
+		OPT_UINT("namespace-id", 'n', &cfg.namespace_id,  namespace_id),
+		OPT_FMT("output-format", 'o', &cfg.output_format, output_format),
+		OPT_FLAG("verbose",      'v', &cfg.verbose,       verbose),
+		OPT_END()
+	};
+
+	err = fd = parse_and_open(argc, argv, desc, opts);
+	if (fd < 0)
+		goto ret;
+
+	err = flags = validate_output_format(cfg.output_format);
+	if (flags < 0)
+		goto close_fd;
+	if (cfg.verbose)
+		flags |= VERBOSE;
+
+	err = nvme_self_test_log(fd, cfg.namespace_id, &self_test_log);
+	if (!err)
+		nvme_show_self_test_log(&self_test_log, devicename, flags);
+	else if (err > 0)
+		nvme_show_status(err);
+	else
+		perror("self test log");
+close_fd:
+	close(fd);
+ret:
+	return nvme_status_to_errno(err, false);
 }
 
 static int get_feature(int argc, char **argv, struct command *cmd, struct plugin *plugin)
@@ -1870,13 +2118,13 @@ static int get_feature(int argc, char **argv, struct command *cmd, struct plugin
 		"saveable, it may be modified by set-feature. Default values "\
 		"are vendor-specific and not changeable. Use set-feature to "\
 		"change saveable Features.";
-	const char *raw_binary = "show infos in binary format";
+	const char *raw = "show feature in binary format";
 	const char *namespace_id = "identifier of desired namespace";
 	const char *feature_id = "feature identifier";
 	const char *sel = "[0-3]: current/default/saved/supported";
 	const char *data_len = "buffer len if data is returned through host memory buffer";
 	const char *cdw11 = "dword 11 for interrupt vector config";
-	const char *human_readable = "show infos in readable format";
+	const char *human_readable = "show feature in readable format";
 	int err, fd;
 	__u32 result;
 	void *buf = NULL;
@@ -1899,32 +2147,32 @@ static int get_feature(int argc, char **argv, struct command *cmd, struct plugin
 		.data_len     = 0,
 	};
 
-	const struct argconfig_commandline_options command_line_options[] = {
-		{"namespace-id",   'n', "NUM", CFG_POSITIVE, &cfg.namespace_id,   required_argument, namespace_id},
-		{"feature-id",     'f', "NUM", CFG_POSITIVE, &cfg.feature_id,     required_argument, feature_id},
-		{"sel",            's', "NUM", CFG_BYTE,     &cfg.sel,            required_argument, sel},
-		{"data-len",       'l', "NUM", CFG_POSITIVE, &cfg.data_len,       required_argument, data_len},
-		{"raw-binary",     'b', "",    CFG_NONE,     &cfg.raw_binary,     no_argument,       raw_binary},
-		{"cdw11",          'c', "NUM", CFG_POSITIVE, &cfg.cdw11,          required_argument, cdw11},
-		{"human-readable", 'H', "",    CFG_NONE,     &cfg.human_readable, no_argument,       human_readable},
-		{NULL}
+	OPT_ARGS(opts) = {
+		OPT_UINT("namespace-id",  'n', &cfg.namespace_id,   namespace_id),
+		OPT_UINT("feature-id",    'f', &cfg.feature_id,     feature_id),
+		OPT_BYTE("sel",           's', &cfg.sel,            sel),
+		OPT_UINT("data-len",      'l', &cfg.data_len,       data_len),
+		OPT_FLAG("raw-binary",    'b', &cfg.raw_binary,     raw),
+		OPT_UINT("cdw11",         'c', &cfg.cdw11,          cdw11),
+		OPT_FLAG("human-readable",'H', &cfg.human_readable, human_readable),
+		OPT_END()
 	};
 
-	fd = parse_and_open(argc, argv, desc, command_line_options, &cfg, sizeof(cfg));
+	err = fd = parse_and_open(argc, argv, desc, opts);
 	if (fd < 0)
-		return fd;
+		goto ret;
 
 	if (cfg.sel > 7) {
 		fprintf(stderr, "invalid 'select' param:%d\n", cfg.sel);
-		err = EINVAL;
+		err = -EINVAL;
 		goto close_fd;
 	}
 	if (!cfg.feature_id) {
 		fprintf(stderr, "feature-id required param\n");
-		err = EINVAL;
+		err = -EINVAL;
 		goto close_fd;
 	}
-	
+
 	switch (cfg.feature_id) {
 	case NVME_FEAT_LBA_RANGE:
 		cfg.data_len = 4096;
@@ -1944,15 +2192,21 @@ static int get_feature(int argc, char **argv, struct command *cmd, struct plugin
 	case NVME_FEAT_PLM_CONFIG:
 		cfg.data_len = 512;
 		break;
+	case NVME_FEAT_TIMESTAMP:
+		cfg.data_len = 8;
+		break;
+	case NVME_FEAT_HOST_BEHAVIOR:
+		cfg.data_len = 512;
+		break;
 	}
 
 	if (cfg.sel == 3)
 		cfg.data_len = 0;
-	
+
 	if (cfg.data_len) {
 		if (posix_memalign(&buf, getpagesize(), cfg.data_len)) {
 			fprintf(stderr, "can not allocate feature payload\n");
-			err = ENOMEM;
+			err = -ENOMEM;
 			goto close_fd;
 		}
 		memset(buf, 0, cfg.data_len);
@@ -1965,25 +2219,26 @@ static int get_feature(int argc, char **argv, struct command *cmd, struct plugin
 			printf("get-feature:%#02x (%s), %s value:%#08x\n", cfg.feature_id,
 				nvme_feature_to_string(cfg.feature_id),
 				nvme_select_to_string(cfg.sel), result);
-			if (cfg.human_readable)
+			if (cfg.sel == 3)
+				nvme_show_select_result(result);
+			else if (cfg.human_readable)
 				nvme_feature_show_fields(cfg.feature_id, result, buf);
-			if (buf)
+			else if (buf)
 				d(buf, cfg.data_len, 16, 1);
 		} else if (buf)
 			d_raw(buf, cfg.data_len);
 	} else if (err > 0) {
-		fprintf(stderr, "NVMe Status:%s(%x)\n",
-				nvme_status_to_string(err), err);
+		nvme_show_status(err);
 	} else
 		perror("get-feature");
 
 	if (buf)
 		free(buf);
 
- close_fd:
+close_fd:
 	close(fd);
-
-	return err;
+ret:
+	return nvme_status_to_errno(err, false);
 }
 
 static int fw_download(int argc, char **argv, struct command *cmd, struct plugin *plugin)
@@ -2003,6 +2258,7 @@ static int fw_download(int argc, char **argv, struct command *cmd, struct plugin
 	unsigned int fw_size;
 	struct stat sb;
 	void *fw_buf, *buf;
+	bool huge;
 
 	struct config {
 		char  *fw;
@@ -2016,22 +2272,23 @@ static int fw_download(int argc, char **argv, struct command *cmd, struct plugin
 		.offset = 0,
 	};
 
-	const struct argconfig_commandline_options command_line_options[] = {
-		{"fw",     'f', "FILE", CFG_STRING,   &cfg.fw,     required_argument, fw},
-		{"xfer",   'x', "NUM",  CFG_POSITIVE, &cfg.xfer,   required_argument, xfer},
-		{"offset", 'o', "NUM",  CFG_POSITIVE, &cfg.offset, required_argument, offset},
-		{NULL}
+	OPT_ARGS(opts) = {
+		OPT_FILE("fw",     'f', &cfg.fw,     fw),
+		OPT_UINT("xfer",   'x', &cfg.xfer,   xfer),
+		OPT_UINT("offset", 'o', &cfg.offset, offset),
+		OPT_END()
 	};
 
-	fd = parse_and_open(argc, argv, desc, command_line_options, &cfg, sizeof(cfg));
+	err = fd = parse_and_open(argc, argv, desc, opts);
 	if (fd < 0)
-		return fd;
+		goto ret;
 
 	fw_fd = open(cfg.fw, O_RDONLY);
 	cfg.offset <<= 2;
 	if (fw_fd < 0) {
-		fprintf(stderr, "no firmware file provided\n");
-		err = EINVAL;
+		fprintf(stderr, "Failed to open firmware file %s: %s\n",
+				cfg.fw, strerror(errno));
+		err = -EINVAL;
 		goto close_fd;
 	}
 
@@ -2044,12 +2301,14 @@ static int fw_download(int argc, char **argv, struct command *cmd, struct plugin
 	fw_size = sb.st_size;
 	if (fw_size & 0x3) {
 		fprintf(stderr, "Invalid size:%d for f/w image\n", fw_size);
-		err = EINVAL;
+		err = -EINVAL;
 		goto close_fw_fd;
 	}
-	if (posix_memalign(&fw_buf, getpagesize(), fw_size)) {
+
+	fw_buf = nvme_alloc(fw_size, &huge);
+	if (!fw_buf) {
 		fprintf(stderr, "No memory for f/w size:%d\n", fw_size);
-		err = ENOMEM;
+		err = -ENOMEM;
 		goto close_fw_fd;
 	}
 
@@ -2057,7 +2316,8 @@ static int fw_download(int argc, char **argv, struct command *cmd, struct plugin
 	if (cfg.xfer == 0 || cfg.xfer % 4096)
 		cfg.xfer = 4096;
 	if (read(fw_fd, fw_buf, fw_size) != ((ssize_t)(fw_size))) {
-		err = EIO;
+		err = -errno;
+		fprintf(stderr, "read :%s :%s\n", cfg.fw, strerror(errno));
 		goto free;
 	}
 
@@ -2069,8 +2329,7 @@ static int fw_download(int argc, char **argv, struct command *cmd, struct plugin
 			perror("fw-download");
 			break;
 		} else if (err != 0) {
-			fprintf(stderr, "NVME Admin command error:%s(%x)\n",
-					nvme_status_to_string(err), err);
+			nvme_show_status(err);
 			break;
 		}
 		fw_buf     += cfg.xfer;
@@ -2080,14 +2339,14 @@ static int fw_download(int argc, char **argv, struct command *cmd, struct plugin
 	if (!err)
 		printf("Firmware download success\n");
 
- free:
-	free(buf);
- close_fw_fd:
+free:
+	nvme_free(buf, huge);
+close_fw_fd:
 	close(fw_fd);
- close_fd:
+close_fd:
 	close(fd);
-
-	return err;
+ret:
+	return nvme_status_to_errno(err, false);
 }
 
 static char *nvme_fw_status_reset_type(__u32 status)
@@ -2124,30 +2383,30 @@ static int fw_commit(int argc, char **argv, struct command *cmd, struct plugin *
 		.bpid   = 0,
 	};
 
-	const struct argconfig_commandline_options command_line_options[] = {
-		{"slot",   's', "NUM", CFG_BYTE, &cfg.slot,   required_argument, slot},
-		{"action", 'a', "NUM", CFG_BYTE, &cfg.action, required_argument, action},
-		{"bpid",   'b', "NUM", CFG_BYTE, &cfg.bpid,   required_argument, bpid},
-		{NULL}
+	OPT_ARGS(opts) = {
+		OPT_BYTE("slot",   's', &cfg.slot,   slot),
+		OPT_BYTE("action", 'a', &cfg.action, action),
+		OPT_BYTE("bpid",   'b', &cfg.bpid,   bpid),
+		OPT_END()
 	};
 
-	fd = parse_and_open(argc, argv, desc, command_line_options, &cfg, sizeof(cfg));
+	err = fd = parse_and_open(argc, argv, desc, opts);
 	if (fd < 0)
-		return fd;
+		goto ret;
 
 	if (cfg.slot > 7) {
 		fprintf(stderr, "invalid slot:%d\n", cfg.slot);
-		err = EINVAL;
+		err = -EINVAL;
 		goto close_fd;
 	}
 	if (cfg.action > 7 || cfg.action == 4 || cfg.action == 5) {
 		fprintf(stderr, "invalid action:%d\n", cfg.action);
-		err = EINVAL;
+		err = -EINVAL;
 		goto close_fd;
 	}
 	if (cfg.bpid > 1) {
 		fprintf(stderr, "invalid boot partition id:%d\n", cfg.bpid);
-		err = EINVAL;
+		err = -EINVAL;
 		goto close_fd;
 	}
 
@@ -2166,8 +2425,7 @@ static int fw_commit(int argc, char **argv, struct command *cmd, struct plugin *
 			printf(", but firmware requires %s reset\n", nvme_fw_status_reset_type(err));
 			break;
 		default:
-			fprintf(stderr, "NVME Admin command error:%s(%x)\n",
-						nvme_status_to_string(err), err);
+			nvme_show_status(err);
 			break;
 		}
 	else {
@@ -2178,10 +2436,10 @@ static int fw_commit(int argc, char **argv, struct command *cmd, struct plugin *
 		printf("\n");
 	}
 
- close_fd:
+close_fd:
 	close(fd);
-
-	return err;
+ret:
+	return nvme_status_to_errno(err, false);
 }
 
 static int subsystem_reset(int argc, char **argv, struct command *cmd, struct plugin *plugin)
@@ -2189,23 +2447,26 @@ static int subsystem_reset(int argc, char **argv, struct command *cmd, struct pl
 	const char *desc = "Resets the NVMe subsystem\n";
 	int err, fd;
 
-	const struct argconfig_commandline_options command_line_options[] = {
-		{NULL}
+	OPT_ARGS(opts) = {
+		OPT_END()
 	};
 
-	fd = parse_and_open(argc, argv, desc, command_line_options, NULL, 0);
+	err = fd = parse_and_open(argc, argv, desc, opts);
 	if (fd < 0)
-		return fd;
+		goto ret;
 
 	err = nvme_subsystem_reset(fd);
 	if (err < 0) {
-		close(fd);
-		perror("Subsystem-reset");
-		return errno;
+		if (errno == ENOTTY)
+			fprintf(stderr,
+				"Subsystem-reset: NVM Subsystem Reset not supported.\n");
+		else
+			perror("Subsystem-reset");
 	}
 
 	close(fd);
-	return err;
+ret:
+	return nvme_status_to_errno(err, false);
 }
 
 static int reset(int argc, char **argv, struct command *cmd, struct plugin *plugin)
@@ -2213,23 +2474,21 @@ static int reset(int argc, char **argv, struct command *cmd, struct plugin *plug
 	const char *desc = "Resets the NVMe controller\n";
 	int err, fd;
 
-	const struct argconfig_commandline_options command_line_options[] = {
-		{NULL}
+	OPT_ARGS(opts) = {
+		OPT_END()
 	};
 
-	fd = parse_and_open(argc, argv, desc, command_line_options, NULL, 0);
+	err = fd = parse_and_open(argc, argv, desc, opts);
 	if (fd < 0)
-		return fd;
+		goto ret;
 
 	err = nvme_reset_controller(fd);
-	if (err < 0) {
-		close(fd);
+	if (err < 0)
 		perror("Reset");
-		return errno;
-	}
 
 	close(fd);
-	return err;
+ret:
+	return nvme_status_to_errno(err, false);
 }
 
 static int ns_rescan(int argc, char **argv, struct command *cmd, struct plugin *plugin)
@@ -2237,23 +2496,21 @@ static int ns_rescan(int argc, char **argv, struct command *cmd, struct plugin *
 	const char *desc = "Rescans the NVMe namespaces\n";
 	int err, fd;
 
-	const struct argconfig_commandline_options command_line_options[] = {
-		{NULL}
+	OPT_ARGS(opts) = {
+		OPT_END()
 	};
 
-	fd = parse_and_open(argc, argv, desc, command_line_options, NULL, 0);
+	err = fd = parse_and_open(argc, argv, desc, opts);
 	if (fd < 0)
-		return fd;
+		goto ret;
 
 	err = nvme_ns_rescan(fd);
-	if (err < 0) {
-		close(fd);
+	if (err < 0)
 		perror("Namespace Rescan");
-		return errno;
-	}
 
 	close(fd);
-	return err;
+ret:
+	return nvme_status_to_errno(err, false);
 }
 
 static int sanitize(int argc, char **argv, struct command *cmd, struct plugin *plugin)
@@ -2266,8 +2523,7 @@ static int sanitize(int argc, char **argv, struct command *cmd, struct plugin *p
 	const char *sanact_desc = "Sanitize action.";
 	const char *ovrpat_desc = "Overwrite pattern.";
 
-	int fd;
-	int ret;
+	int fd, ret;
 
 	struct config {
 		int    no_dealloc;
@@ -2287,19 +2543,19 @@ static int sanitize(int argc, char **argv, struct command *cmd, struct plugin *p
 		.ovrpat = 0,
 	};
 
-	const struct argconfig_commandline_options command_line_options[] = {
-		{"no-dealloc", 'd', "",    CFG_NONE,     &cfg.no_dealloc, no_argument,       no_dealloc_desc},
-		{"oipbp",      'i', "",    CFG_NONE,     &cfg.oipbp,      no_argument,       oipbp_desc},
-		{"owpass",     'n', "NUM", CFG_BYTE,     &cfg.owpass,     required_argument, owpass_desc},
-		{"ause",       'u', "",    CFG_NONE,     &cfg.ause,       no_argument,       ause_desc},
-		{"sanact",     'a', "NUM", CFG_BYTE,     &cfg.sanact,     required_argument, sanact_desc},
-		{"ovrpat",     'p', "NUM", CFG_POSITIVE, &cfg.ovrpat,     required_argument, ovrpat_desc},
-		{NULL}
+	OPT_ARGS(opts) = {
+		OPT_FLAG("no-dealloc", 'd', &cfg.no_dealloc, no_dealloc_desc),
+		OPT_FLAG("oipbp",      'i', &cfg.oipbp,      oipbp_desc),
+		OPT_BYTE("owpass",     'n', &cfg.owpass,     owpass_desc),
+		OPT_FLAG("ause",       'u', &cfg.ause,       ause_desc),
+		OPT_BYTE("sanact",     'a', &cfg.sanact,     sanact_desc),
+		OPT_UINT("ovrpat",     'p', &cfg.ovrpat,     ovrpat_desc),
+		OPT_END()
 	};
 
-	fd = parse_and_open(argc, argv, desc, command_line_options, NULL, 0);
+	ret = fd = parse_and_open(argc, argv, desc, opts);
 	if (fd < 0)
-		return fd;
+		goto ret;
 
 	switch (cfg.sanact) {
 	case NVME_SANITIZE_ACT_CRYPTO_ERASE:
@@ -2309,88 +2565,154 @@ static int sanitize(int argc, char **argv, struct command *cmd, struct plugin *p
 		break;
 	default:
 		fprintf(stderr, "Invalid Sanitize Action\n");
-		ret = EINVAL;
+		ret = -EINVAL;
 		goto close_fd;
 	}
 
 	if (cfg.sanact == NVME_SANITIZE_ACT_EXIT) {
 	       if (cfg.ause || cfg.no_dealloc) {
 			fprintf(stderr, "SANACT is Exit Failure Mode\n");
-			ret = EINVAL;
+			ret = -EINVAL;
 			goto close_fd;
 	       }
 	}
 
 	if (cfg.sanact == NVME_SANITIZE_ACT_OVERWRITE) {
-		if (!(cfg.owpass >= 0 && cfg.owpass <= 16)) {
+		if (cfg.owpass > 16) {
 			fprintf(stderr, "OWPASS out of range [0-16]\n");
-			ret = EINVAL;
+			ret = -EINVAL;
 			goto close_fd;
 		}
 	} else {
 		if (cfg.owpass || cfg.oipbp || cfg.ovrpat) {
 			fprintf(stderr, "SANACT is not Overwrite\n");
-			ret = EINVAL;
+			ret = -EINVAL;
 			goto close_fd;
 		}
 	}
 
 	ret = nvme_sanitize(fd, cfg.sanact, cfg.ause, cfg.owpass, cfg.oipbp,
 			    cfg.no_dealloc, cfg.ovrpat);
-	if (ret)
-		fprintf(stderr, "NVMe Status:%s(%x)\n",
-				nvme_status_to_string(ret), ret);
+	if (ret < 0)
+		perror("sanitize");
+	else if (ret > 0)
+		nvme_show_status(ret);
 
- close_fd:
+close_fd:
 	close(fd);
-
-	return ret;
+ret:
+	return nvme_status_to_errno(ret, false);
 }
 
 static int show_registers(int argc, char **argv, struct command *cmd, struct plugin *plugin)
 {
 	const char *desc = "Reads and shows the defined NVMe controller registers "\
 					"in binary or human-readable format";
-	const char *human_readable = "show info in readable format";
-	void *bar;
-	int fd, err;
+	const char *human_readable = "show info in readable format in case of "\
+					"output_format == normal";
+
+	enum nvme_print_flags flags;
 	bool fabrics = true;
+	int fd, err;
+	void *bar;
 
 	struct config {
 		int human_readable;
+		char *output_format;
 	};
 
 	struct config cfg = {
 		.human_readable = 0,
+		.output_format = "normal",
 	};
 
-	const struct argconfig_commandline_options command_line_options[] = {
-		{"human-readable", 'H', "", CFG_NONE, &cfg.human_readable, no_argument, human_readable},
-		{NULL}
+	OPT_ARGS(opts) = {
+		OPT_FMT("output-format",  'o', &cfg.output_format,  output_format),
+		OPT_FLAG("human-readable",'H', &cfg.human_readable, human_readable),
+		OPT_END()
 	};
 
-	fd = parse_and_open(argc, argv, desc, command_line_options, &cfg, sizeof(cfg));
+	err = fd = parse_and_open(argc, argv, desc, opts);
 	if (fd < 0)
-		return fd;
+		goto ret;
+
+	err = flags = validate_output_format(cfg.output_format);
+	if (flags < 0)
+		goto close_fd;
+	if (cfg.human_readable)
+		flags |= VERBOSE;
 
 	err = nvme_get_properties(fd, &bar);
 	if (err) {
-		bar = get_registers();
+		bar = mmap_registers(devicename);
 		fabrics = false;
+		if (bar)
+			err = 0;
 	}
-	if (!bar) {
-		err = ENODEV;
+	if (!bar)
 		goto close_fd;
-	}
-	show_ctrl_registers(bar, cfg.human_readable ? HUMAN : 0, fabrics);
 
+	nvme_show_ctrl_registers(bar, fabrics, flags);
 	if (fabrics)
 		free(bar);
-
- close_fd:
+	else
+		munmap(bar, getpagesize());
+close_fd:
 	close(fd);
+ret:
+	return nvme_status_to_errno(err, false);
+}
 
-	return err;
+static int get_property(int argc, char **argv, struct command *cmd, struct plugin *plugin)
+{
+	const char *desc = "Reads and shows the defined NVMe controller property "\
+			   "for NVMe over Fabric. Property offset must be one of:\n"
+			   "CAP=0x0, VS=0x8, CC=0x14, CSTS=0x1c, NSSR=0x20";
+	const char *offset = "offset of the requested property";
+	const char *human_readable = "show property in readable format";
+
+	int fd, err;
+	uint64_t value;
+
+	struct config {
+		int offset;
+		int human_readable;
+	};
+
+	struct config cfg = {
+		.offset = -1,
+		.human_readable = 0,
+	};
+
+	OPT_ARGS(opts) = {
+		OPT_UINT("offset",        'o', &cfg.offset,         offset),
+		OPT_FLAG("human-readable",'H', &cfg.human_readable, human_readable),
+		OPT_END()
+	};
+
+	err = fd = parse_and_open(argc, argv, desc, opts);
+	if (fd < 0)
+		goto ret;
+
+	if (cfg.offset == -1) {
+		fprintf(stderr, "offset required param\n");
+		err = -EINVAL;
+		goto close_fd;
+	}
+
+	err = nvme_get_property(fd, cfg.offset, &value);
+	if (err < 0) {
+		perror("get-property");
+	} else if (!err) {
+		nvme_show_single_property(cfg.offset, value, cfg.human_readable);
+	} else if (err > 0) {
+		nvme_show_status(err);
+	}
+
+close_fd:
+	close(fd);
+ret:
+	return nvme_status_to_errno(err, false);
 }
 
 static int set_property(int argc, char **argv, struct command *cmd, struct plugin *plugin)
@@ -2411,24 +2733,24 @@ static int set_property(int argc, char **argv, struct command *cmd, struct plugi
 		.value = -1,
 	};
 
-	const struct argconfig_commandline_options command_line_options[] = {
-		{"offset", 'o', "NUM", CFG_POSITIVE, &cfg.offset, required_argument, offset},
-		{"value", 'v', "NUM", CFG_POSITIVE, &cfg.value, required_argument, value},
-		{NULL}
+	OPT_ARGS(opts) = {
+		OPT_UINT("offset", 'o', &cfg.offset, offset),
+		OPT_UINT("value",  'v', &cfg.value,  value),
+		OPT_END()
 	};
 
-	fd = parse_and_open(argc, argv, desc, command_line_options, &cfg, sizeof(cfg));
+	err = fd = parse_and_open(argc, argv, desc, opts);
 	if (fd < 0)
-		return fd;
+		goto ret;
 
 	if (cfg.offset == -1) {
-		fprintf(stderr, "offset required param");
-		err = EINVAL;
+		fprintf(stderr, "offset required param\n");
+		err = -EINVAL;
 		goto close_fd;
 	}
 	if (cfg.value == -1) {
-		fprintf(stderr, "value required param");
-		err = EINVAL;
+		fprintf(stderr, "value required param\n");
+		err = -EINVAL;
 		goto close_fd;
 	}
 
@@ -2439,14 +2761,13 @@ static int set_property(int argc, char **argv, struct command *cmd, struct plugi
 		printf("set-property: %02x (%s), value: %#08x\n", cfg.offset,
 				nvme_register_to_string(cfg.offset), cfg.value);
 	} else if (err > 0) {
-		fprintf(stderr, "NVMe Status: %s(%x)\n",
-				nvme_status_to_string(err), err);
+		nvme_show_status(err);
 	}
 
- close_fd:
+close_fd:
 	close(fd);
-
-	return err;
+ret:
+	return nvme_status_to_errno(err, false);
 }
 
 static int format(int argc, char **argv, struct command *cmd, struct plugin *plugin)
@@ -2463,9 +2784,13 @@ static int format(int argc, char **argv, struct command *cmd, struct plugin *plu
 	const char *ms = "[0-1]: extended format off/on";
 	const char *reset = "Automatically reset the controller after successful format";
 	const char *timeout = "timeout value, in milliseconds";
+	const char *bs = "target block size";
+	const char *force = "The \"I know what I'm doing\" flag, skip confirmation before sending command";
 	struct nvme_id_ns ns;
-	int err, fd;
+	struct nvme_id_ctrl ctrl;
+	int err, fd, i;
 	__u8 prev_lbaf = 0;
+	__u8 lbads = 0;
 
 	struct config {
 		__u32 namespace_id;
@@ -2475,80 +2800,162 @@ static int format(int argc, char **argv, struct command *cmd, struct plugin *plu
 		__u8  pi;
 		__u8  pil;
 		__u8  ms;
+		__u64 bs;
 		int reset;
+		int force;
 	};
 
 	struct config cfg = {
-		.namespace_id = NVME_NSID_ALL,
+		.namespace_id = 0,
 		.timeout      = 600000,
 		.lbaf         = 0xff,
 		.ses          = 0,
 		.pi           = 0,
 		.reset        = 0,
+		.force        = 0,
+		.bs           = 0,
 	};
 
-	const struct argconfig_commandline_options command_line_options[] = {
-		{"namespace-id", 'n', "NUM",  CFG_POSITIVE, &cfg.namespace_id, required_argument, namespace_id},
-		{"timeout",      't', "NUM",  CFG_POSITIVE, &cfg.timeout,      required_argument, timeout},
-		{"lbaf",         'l', "NUM",  CFG_BYTE,     &cfg.lbaf,         required_argument, lbaf},
-		{"ses",          's', "NUM",  CFG_BYTE,     &cfg.ses,          required_argument, ses},
-		{"pi",           'i', "NUM",  CFG_BYTE,     &cfg.pi,           required_argument, pi},
-		{"pil",          'p', "NUM",  CFG_BYTE,     &cfg.pil,          required_argument, pil},
-		{"ms",           'm', "NUM",  CFG_BYTE,     &cfg.ms,           required_argument, ms},
-		{"reset",        'r', "",     CFG_NONE,     &cfg.reset,        no_argument,       reset},
-		{NULL}
+	OPT_ARGS(opts) = {
+		OPT_UINT("namespace-id", 'n', &cfg.namespace_id, namespace_id),
+		OPT_UINT("timeout",      't', &cfg.timeout,      timeout),
+		OPT_BYTE("lbaf",         'l', &cfg.lbaf,         lbaf),
+		OPT_BYTE("ses",          's', &cfg.ses,          ses),
+		OPT_BYTE("pi",           'i', &cfg.pi,           pi),
+		OPT_BYTE("pil",          'p', &cfg.pil,          pil),
+		OPT_BYTE("ms",           'm', &cfg.ms,           ms),
+		OPT_FLAG("reset",        'r', &cfg.reset,        reset),
+		OPT_FLAG("force",        'f', &cfg.force,        force),
+		OPT_SUFFIX("block-size", 'b', &cfg.bs,           bs),
+		OPT_END()
 	};
 
-	fd = parse_and_open(argc, argv, desc, command_line_options, &cfg, sizeof(cfg));
+	err = fd = parse_and_open(argc, argv, desc, opts);
 	if (fd < 0)
-		return fd;
+		goto ret;
 
-	if (S_ISBLK(nvme_stat.st_mode)) {
-		cfg.namespace_id = get_nsid(fd);
-		if (cfg.namespace_id <= 0)
-			return EINVAL;
+	if (cfg.lbaf != 0xff && cfg.bs !=0) {
+		fprintf(stderr,
+			"Invalid specification of both LBAF and Block Size, please specify only one\n");
+		err = -EINVAL;
+		goto close_fd;
 	}
+	if (cfg.bs) {
+		if ((cfg.bs & (~cfg.bs + 1)) != cfg.bs) {
+			fprintf(stderr,
+				"Invalid value for block size (%"PRIu64"), must be a power of two\n",
+				       (uint64_t) cfg.bs);
+			err = -EINVAL;
+			goto close_fd;
+		}
+	}
+
+	err = nvme_identify_ctrl(fd, &ctrl);
+	if (err) {
+		perror("identify-ctrl");
+		goto close_fd;
+	}
+
+	if ((ctrl.fna & 1) == 1) {
+		/*
+		 * FNA bit 0 set to 1: all namespaces ... shall be configured with the same
+		 * attributes and a format (excluding secure erase) of any namespace results in a
+		 * format of all namespaces.
+		 */
+		cfg.namespace_id = NVME_NSID_ALL;
+	} else {
+		if (!cfg.namespace_id) {
+			cfg.namespace_id = nvme_get_nsid(fd);
+			if (cfg.namespace_id < 0) {
+				err = cfg.namespace_id;
+				goto close_fd;
+			}
+		}
+	}
+
+	if (cfg.namespace_id == 0) {
+		fprintf(stderr,
+			"Invalid namespace ID, "
+			"specify a namespace to format or use '-n 0xffffffff' "
+			"to format all namespaces on this controller.\n");
+		err = -EINVAL;
+		goto close_fd;
+	}
+
 	if (cfg.namespace_id != NVME_NSID_ALL) {
 		err = nvme_identify_ns(fd, cfg.namespace_id, 0, &ns);
 		if (err) {
 			if (err < 0)
 				perror("identify-namespace");
-			else
-				fprintf(stderr,
-					"NVME Admin command error:%s(%x)\n",
-					nvme_status_to_string(err), err);
-			return err;
+			else {
+				fprintf(stderr, "identify failed\n");
+				nvme_show_status(err);
+			}
+			goto close_fd;
 		}
 		prev_lbaf = ns.flbas & 0xf;
+
+		if (cfg.bs) {
+			for (i = 0; i < 16; ++i) {
+				if ((1ULL << ns.lbaf[i].ds) == cfg.bs &&
+				    ns.lbaf[i].ms == 0) {
+					cfg.lbaf = i;
+					break;
+				}
+			}
+			if (cfg.lbaf == 0xff) {
+				fprintf(stderr,
+					"LBAF corresponding to block size %"PRIu64"(LBAF %u) not found\n",
+					(uint64_t)cfg.bs, lbads);
+				fprintf(stderr,
+					"Please correct block size, or specify LBAF directly\n");
+				err = -EINVAL;
+				goto close_fd;
+			}
+		} else  if (cfg.lbaf == 0xff)
+			cfg.lbaf = prev_lbaf;
 	}
-	if (cfg.lbaf == 0xff)
-		cfg.lbaf = prev_lbaf;
+	else {
+		if (cfg.lbaf == 0xff) cfg.lbaf = 0;
+	}
 
 	/* ses & pi checks set to 7 for forward-compatibility */
 	if (cfg.ses > 7) {
 		fprintf(stderr, "invalid secure erase settings:%d\n", cfg.ses);
-		err = EINVAL;
+		err = -EINVAL;
 		goto close_fd;
 	}
 	if (cfg.lbaf > 15) {
 		fprintf(stderr, "invalid lbaf:%d\n", cfg.lbaf);
-		err = EINVAL;
+		err = -EINVAL;
 		goto close_fd;
 	}
 	if (cfg.pi > 7) {
 		fprintf(stderr, "invalid pi:%d\n", cfg.pi);
-		err = EINVAL;
+		err = -EINVAL;
 		goto close_fd;
 	}
 	if (cfg.pil > 1) {
 		fprintf(stderr, "invalid pil:%d\n", cfg.pil);
-		err = EINVAL;
+		err = -EINVAL;
 		goto close_fd;
 	}
 	if (cfg.ms > 1) {
 		fprintf(stderr, "invalid ms:%d\n", cfg.ms);
-		err = EINVAL;
+		err = -EINVAL;
 		goto close_fd;
+	}
+
+	if (!cfg.force) {
+		fprintf(stderr, "You are about to format %s, namespace %#x%s.\n",
+			devicename, cfg.namespace_id,
+			cfg.namespace_id == NVME_NSID_ALL ? "(ALL namespaces)" : "");
+		nvme_show_relatives(devicename);
+		fprintf(stderr, "WARNING: Format may irrevocably delete this device's data.\n"
+			"You have 10 seconds to press Ctrl-C to cancel this operation.\n\n"
+			"Use the force [--force|-f] option to suppress this warning.\n");
+		sleep(10);
+		fprintf(stderr, "Sending format operation ... \n");
 	}
 
 	err = nvme_format(fd, cfg.namespace_id, cfg.lbaf, cfg.ses, cfg.pi,
@@ -2556,19 +2963,23 @@ static int format(int argc, char **argv, struct command *cmd, struct plugin *plu
 	if (err < 0)
 		perror("format");
 	else if (err != 0)
-		fprintf(stderr, "NVME Admin command error:%s(%x)\n",
-					nvme_status_to_string(err), err);
+		nvme_show_status(err);
 	else {
 		printf("Success formatting namespace:%x\n", cfg.namespace_id);
-		ioctl(fd, BLKRRPART);
+		if (cfg.lbaf != prev_lbaf && ioctl(fd, BLKRRPART) < 0) {
+			fprintf(stderr, "failed to re-read partition table\n");
+			err = -errno;
+			goto close_fd;
+		}
+
 		if (cfg.reset && S_ISCHR(nvme_stat.st_mode))
 			nvme_reset_controller(fd);
 	}
 
- close_fd:
+close_fd:
 	close(fd);
-
-	return err;
+ret:
+	return nvme_status_to_errno(err, false);
 }
 
 static int set_feature(int argc, char **argv, struct command *cmd, struct plugin *plugin)
@@ -2613,24 +3024,24 @@ static int set_feature(int argc, char **argv, struct command *cmd, struct plugin
 		.save         = 0,
 	};
 
-	const struct argconfig_commandline_options command_line_options[] = {
-		{"namespace-id", 'n', "NUM",  CFG_POSITIVE, &cfg.namespace_id, required_argument, namespace_id},
-		{"feature-id",   'f', "NUM",  CFG_POSITIVE, &cfg.feature_id,   required_argument, feature_id},
-		{"value",        'v', "NUM",  CFG_POSITIVE, &cfg.value,        required_argument, value},
-		{"cdw12",        'c', "NUM",  CFG_POSITIVE, &cfg.cdw12,        required_argument, cdw12},
-		{"data-len",     'l', "NUM",  CFG_POSITIVE, &cfg.data_len,     required_argument, data_len},
-		{"data",         'd', "FILE", CFG_STRING,   &cfg.file,         required_argument, data},
-		{"save",         's', "",     CFG_NONE,     &cfg.save,         no_argument, save},
-		{NULL}
+	OPT_ARGS(opts) = {
+		OPT_UINT("namespace-id", 'n', &cfg.namespace_id, namespace_id),
+		OPT_UINT("feature-id",   'f', &cfg.feature_id,   feature_id),
+		OPT_UINT("value",        'v', &cfg.value,        value),
+		OPT_UINT("cdw12",        'c', &cfg.cdw12,        cdw12),
+		OPT_UINT("data-len",     'l', &cfg.data_len,     data_len),
+		OPT_FILE("data",         'd', &cfg.file,         data),
+		OPT_FLAG("save",         's', &cfg.save,         save),
+		OPT_END()
 	};
 
-	fd = parse_and_open(argc, argv, desc, command_line_options, &cfg, sizeof(cfg));
+	err = fd = parse_and_open(argc, argv, desc, opts);
 	if (fd < 0)
-		return fd;
+		goto ret;
 
 	if (!cfg.feature_id) {
 		fprintf(stderr, "feature-id required param\n");
-		err = EINVAL;
+		err = -EINVAL;
 		goto close_fd;
 	}
 	if (cfg.feature_id == NVME_FEAT_LBA_RANGE)
@@ -2638,7 +3049,7 @@ static int set_feature(int argc, char **argv, struct command *cmd, struct plugin
 	if (cfg.data_len) {
 		if (posix_memalign(&buf, getpagesize(), cfg.data_len)) {
 			fprintf(stderr, "can not allocate feature payload\n");
-			err = ENOMEM;
+			err = -ENOMEM;
 			goto close_fd;
 		}
 		memset(buf, 0, cfg.data_len);
@@ -2648,14 +3059,17 @@ static int set_feature(int argc, char **argv, struct command *cmd, struct plugin
 		if (strlen(cfg.file)) {
 			ffd = open(cfg.file, O_RDONLY);
 			if (ffd <= 0) {
-				fprintf(stderr, "no firmware file provided\n");
-				err = EINVAL;
+				fprintf(stderr, "Failed to open file %s: %s\n",
+						cfg.file, strerror(errno));
+				err = -EINVAL;
 				goto free;
 			}
 		}
-		if (read(ffd, (void *)buf, cfg.data_len) < 0) {
-			fprintf(stderr, "failed to read data buffer from input file\n");
-			err = EINVAL;
+		err = read(ffd, (void *)buf, cfg.data_len);
+		if (err < 0) {
+			err = -errno;
+			fprintf(stderr, "failed to read data buffer from input"
+					" file: %s\n", strerror(errno));
 			goto close_ffd;
 		}
 	}
@@ -2669,23 +3083,23 @@ static int set_feature(int argc, char **argv, struct command *cmd, struct plugin
 			nvme_feature_to_string(cfg.feature_id), cfg.value);
 		if (buf) {
 			if (cfg.feature_id == NVME_FEAT_LBA_RANGE)
-				show_lba_range((struct nvme_lba_range_type *)buf,
+				nvme_show_lba_range((struct nvme_lba_range_type *)buf,
 								result);
 			else
 				d(buf, cfg.data_len, 16, 1);
 		}
 	} else if (err > 0)
-		fprintf(stderr, "NVMe Status:%s(%x)\n",
-				nvme_status_to_string(err), err);
+		nvme_show_status(err);
 
- close_ffd:
+close_ffd:
 	close(ffd);
- free:
+free:
 	if (buf)
 		free(buf);
- close_fd:
+close_fd:
 	close(fd);
-	return err;
+ret:
+	return nvme_status_to_errno(err, false);
 }
 
 static int sec_send(int argc, char **argv, struct command *cmd, struct plugin *plugin)
@@ -2723,24 +3137,25 @@ static int sec_send(int argc, char **argv, struct command *cmd, struct plugin *p
 		.tl   = 0,
 	};
 
-	const struct argconfig_commandline_options command_line_options[] = {
-		{"namespace-id", 'n', "NUM",  CFG_POSITIVE, &cfg.namespace_id, required_argument, namespace_id},
-		{"file",         'f', "FILE", CFG_STRING,   &cfg.file,         required_argument, file},
-		{"nssf",         'N', "NUM",  CFG_BYTE,     &cfg.nssf,         required_argument, nssf},
-		{"secp",         'p', "NUM",  CFG_BYTE,     &cfg.secp,         required_argument, secp},
-		{"spsp",         's', "NUM",  CFG_SHORT,    &cfg.spsp,         required_argument, spsp},
-		{"tl",           't', "NUM",  CFG_POSITIVE, &cfg.tl,           required_argument, tl},
-		{NULL}
+	OPT_ARGS(opts) = {
+		OPT_UINT("namespace-id", 'n', &cfg.namespace_id, namespace_id),
+		OPT_FILE("file",         'f', &cfg.file,         file),
+		OPT_BYTE("nssf",         'N', &cfg.nssf,         nssf),
+		OPT_BYTE("secp",         'p', &cfg.secp,         secp),
+		OPT_SHRT("spsp",         's', &cfg.spsp,         spsp),
+		OPT_UINT("tl",           't', &cfg.tl,           tl),
+		OPT_END()
 	};
 
-	fd = parse_and_open(argc, argv, desc, command_line_options, &cfg, sizeof(cfg));
+	err = fd = parse_and_open(argc, argv, desc, opts);
 	if (fd < 0)
-		return fd;
+		goto ret;
 
 	sec_fd = open(cfg.file, O_RDONLY);
 	if (sec_fd < 0) {
-		fprintf(stderr, "no firmware file provided\n");
-		err = EINVAL;
+		fprintf(stderr, "Failed to open %s: %s\n",
+				cfg.file, strerror(errno));
+		err = -EINVAL;
 		goto close_fd;
 	}
 
@@ -2753,14 +3168,15 @@ static int sec_send(int argc, char **argv, struct command *cmd, struct plugin *p
 	sec_size = sb.st_size;
 	if (posix_memalign(&sec_buf, getpagesize(), sec_size)) {
 		fprintf(stderr, "No memory for security size:%d\n", sec_size);
-		err = ENOMEM;
+		err = -ENOMEM;
 		goto close_sec_fd;
 	}
 
-	if (read(sec_fd, sec_buf, sec_size) < 0) {
-		fprintf(stderr, "Failed to read data from security file with %s\n",
-			strerror(errno));
-		err = EINVAL;
+	err = read(sec_fd, sec_buf, sec_size);
+	if (err < 0) {
+		err = -errno;
+		fprintf(stderr, "Failed to read data from security file"
+				" %s with %s\n", cfg.file, strerror(errno));
 		goto free;
 	}
 
@@ -2773,162 +3189,166 @@ static int sec_send(int argc, char **argv, struct command *cmd, struct plugin *p
 	else
 		printf("NVME Security Send Command Success:%d\n", result);
 
- free:
+free:
 	free(sec_buf);
- close_sec_fd:
+close_sec_fd:
 	close(sec_fd);
- close_fd:
+close_fd:
 	close(fd);
-	return err;
+ret:
+	return nvme_status_to_errno(err, false);
 }
 
 static int dir_send(int argc, char **argv, struct command *cmd, struct plugin *plugin)
 {
-        const char *desc = "Set directive parameters of the "\
-                "specified directive type.";
-        const char *raw_binary = "show infos in binary format";
-        const char *namespace_id = "identifier of desired namespace";
-        const char *data_len = "buffer len (if) data is returned";
-        const char *dtype = "directive type";
-        const char *dspec = "directive specification associated with directive type";
-        const char *doper = "directive operation";
-        const char *endir = "directive enable";
-        const char *ttype = "target directive type to be enabled/disabled";
-        const char *human_readable = "show infos in readable format";
-        int err, fd;
-        __u32 result;
-        __u32 dw12 = 0;
-        void *buf = NULL;
-        int ffd = STDIN_FILENO;
+	const char *desc = "Set directive parameters of the "\
+			    "specified directive type.";
+	const char *raw = "show directive in binary format";
+	const char *namespace_id = "identifier of desired namespace";
+	const char *data_len = "buffer len (if) data is returned";
+	const char *dtype = "directive type";
+	const char *dspec = "directive specification associated with directive type";
+	const char *doper = "directive operation";
+	const char *endir = "directive enable";
+	const char *ttype = "target directive type to be enabled/disabled";
+	const char *human_readable = "show directive in readable format";
+	int err, fd;
+	__u32 result;
+	__u32 dw12 = 0;
+	void *buf = NULL;
+	int ffd = STDIN_FILENO;
 
-        struct config {
-                char *file;
-                __u32 namespace_id;
-                __u32 data_len;
-                __u16 dspec;
-                __u8  dtype;
-                __u8  doper;
-                __u16 endir;
-                __u8  ttype;
-                int  raw_binary;
-                int  human_readable;
-        };
+	struct config {
+		char *file;
+		__u32 namespace_id;
+		__u32 data_len;
+		__u16 dspec;
+		__u8  dtype;
+		__u8  doper;
+		__u16 endir;
+		__u8  ttype;
+		int  raw_binary;
+		int  human_readable;
+	};
 
-        struct config cfg = {
-                .file         = "",
-                .namespace_id = 1,
-                .data_len     = 0,
-                .dspec        = 0,
-                .dtype        = 0,
-                .ttype        = 0,
-                .doper        = 0,
-                .endir        = 1,
-        };
+	struct config cfg = {
+		.file         = "",
+		.namespace_id = 1,
+		.data_len     = 0,
+		.dspec        = 0,
+		.dtype        = 0,
+		.ttype        = 0,
+		.doper        = 0,
+		.endir        = 1,
+	};
 
-        const struct argconfig_commandline_options command_line_options[] = {
-                {"namespace-id",   'n', "NUM", CFG_POSITIVE, &cfg.namespace_id,   required_argument, namespace_id},
-                {"data-len",       'l', "NUM", CFG_POSITIVE, &cfg.data_len,       required_argument, data_len},
-                {"raw-binary",     'b', "FLAG",CFG_NONE,     &cfg.raw_binary,     no_argument,       raw_binary},
-                {"dir-type",       'D', "NUM", CFG_BYTE,     &cfg.dtype,          required_argument, dtype},
-                {"target-dir",     'T', "NUM", CFG_BYTE,     &cfg.ttype,          required_argument, ttype},
-                {"dir-spec",       'S', "NUM", CFG_SHORT,    &cfg.dspec,          required_argument, dspec},
-                {"dir-oper",       'O', "NUM", CFG_BYTE,     &cfg.doper,          required_argument, doper},
-                {"endir",          'e', "NUM", CFG_SHORT,    &cfg.endir,          required_argument, endir},
-                {"human-readable", 'H', "FLAG",CFG_NONE,     &cfg.human_readable, no_argument,       human_readable},
-                {NULL}
-        };
+	OPT_ARGS(opts) = {
+		OPT_UINT("namespace-id",  'n', &cfg.namespace_id,   namespace_id),
+		OPT_UINT("data-len",      'l', &cfg.data_len,       data_len),
+		OPT_BYTE("dir-type",      'D', &cfg.dtype,          dtype),
+		OPT_BYTE("target-dir",    'T', &cfg.ttype,          ttype),
+		OPT_SHRT("dir-spec",      'S', &cfg.dspec,          dspec),
+		OPT_BYTE("dir-oper",      'O', &cfg.doper,          doper),
+		OPT_SHRT("endir",         'e', &cfg.endir,          endir),
+		OPT_FLAG("human-readable",'H', &cfg.human_readable, human_readable),
+		OPT_FLAG("raw-binary",    'b', &cfg.raw_binary,     raw),
+		OPT_END()
+	};
 
-        fd = parse_and_open(argc, argv, desc, command_line_options, &cfg, sizeof(cfg));
+	err = fd = parse_and_open(argc, argv, desc, opts);
 	if (fd < 0)
-		return fd;
+		goto ret;
 
-        switch (cfg.dtype) {
-        case NVME_DIR_IDENTIFY:
-                switch (cfg.doper) {
-                case NVME_DIR_SND_ID_OP_ENABLE:
-                        if (!cfg.ttype) {
-                                fprintf(stderr, "target-dir required param\n");
-                                err = EINVAL;
+	switch (cfg.dtype) {
+	case NVME_DIR_IDENTIFY:
+		switch (cfg.doper) {
+		case NVME_DIR_SND_ID_OP_ENABLE:
+			if (!cfg.ttype) {
+				fprintf(stderr, "target-dir required param\n");
+				err = -EINVAL;
 				goto close_fd;
-                        }
-                        dw12 = cfg.ttype << 8 | cfg.endir;
-                        break;
-                default:
-                        fprintf(stderr, "invalid directive operations for Identify Directives\n");
-                        err = EINVAL;
-			goto close_fd;
-                }
-                break;
-        case NVME_DIR_STREAMS:
-                switch (cfg.doper) {
-                case NVME_DIR_SND_ST_OP_REL_ID:
-                case NVME_DIR_SND_ST_OP_REL_RSC:
-                        break;
-                default:
-                        fprintf(stderr, "invalid directive operations for Streams Directives\n");
-                        err = EINVAL;
-			goto close_fd;
-                }
-                break;
-        default:
-                fprintf(stderr, "invalid directive type\n");
-                err = EINVAL;
-		goto close_fd;
-        }
-
-
-        if (cfg.data_len) {
-                if (posix_memalign(&buf, getpagesize(), cfg.data_len)) {
-			err = ENOMEM;
+			}
+			dw12 = cfg.ttype << 8 | cfg.endir;
+			break;
+		default:
+			fprintf(stderr, "invalid directive operations for Identify Directives\n");
+			err = -EINVAL;
 			goto close_fd;
 		}
-                memset(buf, 0, cfg.data_len);
-        }
+		break;
+	case NVME_DIR_STREAMS:
+		switch (cfg.doper) {
+		case NVME_DIR_SND_ST_OP_REL_ID:
+		case NVME_DIR_SND_ST_OP_REL_RSC:
+			break;
+		default:
+			fprintf(stderr, "invalid directive operations for Streams Directives\n");
+			err = -EINVAL;
+			goto close_fd;
+		}
+		break;
+	default:
+		fprintf(stderr, "invalid directive type\n");
+		err = -EINVAL;
+		goto close_fd;
+	}
 
-        if (buf) {
-                if (strlen(cfg.file)) {
-                        ffd = open(cfg.file, O_RDONLY);
-                        if (ffd <= 0) {
-                                fprintf(stderr, "no firmware file provided\n");
-				err = EINVAL;
+
+	if (cfg.data_len) {
+		if (posix_memalign(&buf, getpagesize(), cfg.data_len)) {
+			err = -ENOMEM;
+			goto close_fd;
+		}
+		memset(buf, 0, cfg.data_len);
+	}
+
+	if (buf) {
+		if (strlen(cfg.file)) {
+			ffd = open(cfg.file, O_RDONLY);
+			if (ffd <= 0) {
+				fprintf(stderr, "Failed to open file %s: %s\n",
+						cfg.file, strerror(errno));
+				err = -EINVAL;
 				goto free;
-                        }
-                }
-                if (read(ffd, (void *)buf, cfg.data_len) < 0) {
-                        fprintf(stderr, "failed to read data buffer from input file\n");
-			err = EINVAL;
+			}
+		}
+		err = read(ffd, (void *)buf, cfg.data_len);
+		if (err < 0) {
+			err = -errno;
+			fprintf(stderr, "failed to read data buffer from input"
+					" file %s\n", strerror(errno));
 			goto close_ffd;
-                }
-        }
+		}
+	}
 
-        err = nvme_dir_send(fd, cfg.namespace_id, cfg.dspec, cfg.dtype, cfg.doper,
-                                cfg.data_len, dw12, buf, &result);
-        if (err < 0) {
-                perror("dir-send");
+	err = nvme_dir_send(fd, cfg.namespace_id, cfg.dspec, cfg.dtype, cfg.doper,
+			cfg.data_len, dw12, buf, &result);
+	if (err < 0) {
+		perror("dir-send");
 		goto close_ffd;
-        }
-        if (!err) {
-                printf("dir-send: type %#x, operation %#x, spec_val %#x, nsid %#x, result %#x \n",
-                                cfg.dtype, cfg.doper, cfg.dspec, cfg.namespace_id, result);
-                if (buf) {
-                        if (!cfg.raw_binary)
-                                d(buf, cfg.data_len, 16, 1);
-                        else
-                                d_raw(buf, cfg.data_len);
-                }
-        }
-        else if (err > 0)
-                fprintf(stderr, "NVMe Status:%s(%x)\n",
-                                nvme_status_to_string(err), err);
+	}
+	if (!err) {
+		printf("dir-send: type %#x, operation %#x, spec_val %#x, nsid %#x, result %#x \n",
+				cfg.dtype, cfg.doper, cfg.dspec, cfg.namespace_id, result);
+		if (buf) {
+			if (!cfg.raw_binary)
+				d(buf, cfg.data_len, 16, 1);
+			else
+				d_raw(buf, cfg.data_len);
+		}
+	}
+	else if (err > 0)
+		nvme_show_status(err);
 
- close_ffd:
+close_ffd:
 	close(ffd);
- free:
-        if (buf)
-                free(buf);
- close_fd:
+free:
+	if (buf)
+		free(buf);
+close_fd:
 	close(fd);
-        return err;
+ret:
+	return nvme_status_to_errno(err, false);
 }
 
 static int write_uncor(int argc, char **argv, struct command *cmd, struct plugin *plugin)
@@ -2952,21 +3372,23 @@ static int write_uncor(int argc, char **argv, struct command *cmd, struct plugin
 		.block_count     = 0,
 	};
 
-	const struct argconfig_commandline_options command_line_options[] = {
-		{"namespace-id", 'n', "NUM", CFG_POSITIVE,    &cfg.namespace_id, required_argument, namespace_id},
-		{"start-block",  's', "NUM", CFG_LONG_SUFFIX, &cfg.start_block,  required_argument, start_block},
-		{"block-count",  'c', "NUM", CFG_SHORT,       &cfg.block_count,  required_argument, block_count},
-		{NULL}
+	OPT_ARGS(opts) = {
+		OPT_UINT("namespace-id",  'n', &cfg.namespace_id, namespace_id),
+		OPT_SUFFIX("start-block", 's', &cfg.start_block,  start_block),
+		OPT_SHRT("block-count",   'c', &cfg.block_count,  block_count),
+		OPT_END()
 	};
 
-	fd = parse_and_open(argc, argv, desc, command_line_options, &cfg, sizeof(cfg));
+	err = fd = parse_and_open(argc, argv, desc, opts);
 	if (fd < 0)
-		return fd;
+		goto ret;
 
 	if (!cfg.namespace_id) {
-		cfg.namespace_id = get_nsid(fd);
-		if (cfg.namespace_id <= 0)
-			return EINVAL;
+		cfg.namespace_id = nvme_get_nsid(fd);
+		if (cfg.namespace_id < 0) {
+			err = cfg.namespace_id;
+			goto close_fd;
+		}
 	}
 
 	err = nvme_write_uncorrectable(fd, cfg.namespace_id, cfg.start_block,
@@ -2974,14 +3396,14 @@ static int write_uncor(int argc, char **argv, struct command *cmd, struct plugin
 	if (err < 0)
 		perror("write uncorrectable");
 	else if (err != 0)
-		fprintf(stderr, "NVME IO command error:%s(%x)\n",
-					nvme_status_to_string(err), err);
+		nvme_show_status(err);
 	else
 		printf("NVME Write Uncorrectable Success\n");
 
+close_fd:
 	close(fd);
-
-	return err;
+ret:
+	return nvme_status_to_errno(err, false);
 }
 
 static int write_zeroes(int argc, char **argv, struct command *cmd, struct plugin *plugin)
@@ -3023,26 +3445,26 @@ static int write_zeroes(int argc, char **argv, struct command *cmd, struct plugi
 		.app_tag         = 0,
 	};
 
-	const struct argconfig_commandline_options command_line_options[] = {
-		{"namespace-id",      'n', "NUM", CFG_POSITIVE,    &cfg.namespace_id,      required_argument, namespace_id},
-		{"start-block",       's', "NUM", CFG_LONG_SUFFIX, &cfg.start_block,       required_argument, start_block},
-		{"block-count",       'c', "NUM", CFG_SHORT,       &cfg.block_count,       required_argument, block_count},
-		{"deac",              'd', "",    CFG_NONE,        &cfg.deac,              no_argument,       deac},
-		{"limited-retry",     'l', "",    CFG_NONE,        &cfg.limited_retry,     no_argument,       limited_retry},
-		{"force-unit-access", 'f', "",    CFG_NONE,        &cfg.force_unit_access, no_argument,       force},
-		{"prinfo",            'p', "NUM", CFG_BYTE,        &cfg.prinfo,            required_argument, prinfo},
-		{"ref-tag",           'r', "NUM", CFG_POSITIVE,    &cfg.ref_tag,           required_argument, ref_tag},
-		{"app-tag-mask",      'm', "NUM", CFG_SHORT,       &cfg.app_tag_mask,      required_argument, app_tag_mask},
-		{"app-tag",           'a', "NUM", CFG_SHORT,       &cfg.app_tag,           required_argument, app_tag},
-		{NULL}
+	OPT_ARGS(opts) = {
+		OPT_UINT("namespace-id",      'n', &cfg.namespace_id,      namespace_id),
+		OPT_SUFFIX("start-block",     's', &cfg.start_block,       start_block),
+		OPT_SHRT("block-count",       'c', &cfg.block_count,       block_count),
+		OPT_FLAG("deac",              'd', &cfg.deac,              deac),
+		OPT_FLAG("limited-retry",     'l', &cfg.limited_retry,     limited_retry),
+		OPT_FLAG("force-unit-access", 'f', &cfg.force_unit_access, force),
+		OPT_BYTE("prinfo",            'p', &cfg.prinfo,            prinfo),
+		OPT_UINT("ref-tag",           'r', &cfg.ref_tag,           ref_tag),
+		OPT_SHRT("app-tag-mask",      'm', &cfg.app_tag_mask,      app_tag_mask),
+		OPT_SHRT("app-tag",           'a', &cfg.app_tag,           app_tag),
+		OPT_END()
 	};
 
-	fd = parse_and_open(argc, argv, desc, command_line_options, &cfg, sizeof(cfg));
+	err = fd = parse_and_open(argc, argv, desc, opts);
 	if (fd < 0)
-		return fd;
+		goto ret;
 
 	if (cfg.prinfo > 0xf) {
-		err = EINVAL;
+		err = -EINVAL;
 		goto close_fd;
 	}
 
@@ -3054,9 +3476,11 @@ static int write_zeroes(int argc, char **argv, struct command *cmd, struct plugi
 	if (cfg.deac)
 		control |= NVME_RW_DEAC;
 	if (!cfg.namespace_id) {
-		cfg.namespace_id = get_nsid(fd);
-		if (cfg.namespace_id <= 0)
-			return EINVAL;
+		cfg.namespace_id = nvme_get_nsid(fd);
+		if (cfg.namespace_id < 0) {
+			err = cfg.namespace_id;
+			goto close_fd;
+		}
 	}
 
 	err = nvme_write_zeros(fd, cfg.namespace_id, cfg.start_block, cfg.block_count,
@@ -3064,14 +3488,14 @@ static int write_zeroes(int argc, char **argv, struct command *cmd, struct plugi
 	if (err < 0)
 		perror("write-zeroes");
 	else if (err != 0)
-		fprintf(stderr, "NVME IO command error:%s(%x)\n",
-					nvme_status_to_string(err), err);
+		nvme_show_status(err);
 	else
 		printf("NVME Write Zeroes Success\n");
 
- close_fd:
+close_fd:
 	close(fd);
-	return err;
+ret:
+	return nvme_status_to_errno(err, false);
 }
 
 static int dsm(int argc, char **argv, struct command *cmd, struct plugin *plugin)
@@ -3118,36 +3542,38 @@ static int dsm(int argc, char **argv, struct command *cmd, struct plugin *plugin
 		.cdw11 = 0,
 	};
 
-	const struct argconfig_commandline_options command_line_options[] = {
-		{"namespace-id", 'n', "NUM",  CFG_POSITIVE, &cfg.namespace_id, required_argument, namespace_id},
-		{"ctx-attrs",    'a', "LIST", CFG_STRING,   &cfg.ctx_attrs,    required_argument, context_attrs},
-		{"blocks", 	 'b', "LIST", CFG_STRING,   &cfg.blocks,       required_argument, blocks},
-		{"slbs", 	 's', "LIST", CFG_STRING,   &cfg.slbas,        required_argument, starting_blocks},
-		{"ad", 	         'd', "",     CFG_NONE,     &cfg.ad,           no_argument,       ad},
-		{"idw", 	 'w', "",     CFG_NONE,     &cfg.idw,          no_argument,       idw},
-		{"idr", 	 'r', "",     CFG_NONE,     &cfg.idr,          no_argument,       idr},
-		{"cdw11",        'c', "NUM",  CFG_POSITIVE, &cfg.cdw11,        required_argument, cdw11},
-		{NULL}
+	OPT_ARGS(opts) = {
+		OPT_UINT("namespace-id", 'n', &cfg.namespace_id, namespace_id),
+		OPT_LIST("ctx-attrs",    'a', &cfg.ctx_attrs,    context_attrs),
+		OPT_LIST("blocks", 	 'b', &cfg.blocks,       blocks),
+		OPT_LIST("slbs", 	 's', &cfg.slbas,        starting_blocks),
+		OPT_FLAG("ad", 	         'd', &cfg.ad,           ad),
+		OPT_FLAG("idw", 	 'w', &cfg.idw,          idw),
+		OPT_FLAG("idr", 	 'r', &cfg.idr,          idr),
+		OPT_UINT("cdw11",        'c', &cfg.cdw11,        cdw11),
+		OPT_END()
 	};
 
-	fd = parse_and_open(argc, argv, desc, command_line_options, &cfg, sizeof(cfg));
+	err = fd = parse_and_open(argc, argv, desc, opts);
 	if (fd < 0)
-		return fd;
+		goto ret;
 
-	nc = argconfig_parse_comma_sep_array(cfg.ctx_attrs, ctx_attrs, array_len(ctx_attrs));
-	nb = argconfig_parse_comma_sep_array(cfg.blocks, nlbs, array_len(nlbs));
-	ns = argconfig_parse_comma_sep_array_long(cfg.slbas, slbas, array_len(slbas));
+	nc = argconfig_parse_comma_sep_array(cfg.ctx_attrs, ctx_attrs, ARRAY_SIZE(ctx_attrs));
+	nb = argconfig_parse_comma_sep_array(cfg.blocks, nlbs, ARRAY_SIZE(nlbs));
+	ns = argconfig_parse_comma_sep_array_long(cfg.slbas, slbas, ARRAY_SIZE(slbas));
 	nr = max(nc, max(nb, ns));
 	if (!nr || nr > 256) {
 		fprintf(stderr, "No range definition provided\n");
-		err = EINVAL;
+		err = -EINVAL;
 		goto close_fd;
 	}
 
 	if (!cfg.namespace_id) {
-		cfg.namespace_id = get_nsid(fd);
-		if (cfg.namespace_id <= 0)
-			return EINVAL;
+		cfg.namespace_id = nvme_get_nsid(fd);
+		if (cfg.namespace_id < 0) {
+			err = cfg.namespace_id;
+			goto close_fd;
+		}
 	}
 	if (!cfg.cdw11)
 		cfg.cdw11 = (cfg.ad << 2) | (cfg.idw << 1) | (cfg.idr << 0);
@@ -3155,7 +3581,7 @@ static int dsm(int argc, char **argv, struct command *cmd, struct plugin *plugin
 	dsm = nvme_setup_dsm_range((__u32 *)ctx_attrs, (__u32 *)nlbs, (__u64 *)slbas, nr);
 	if (!dsm) {
 		fprintf(stderr, "failed to allocate data set payload\n");
-		err = ENOMEM;
+		err = -ENOMEM;
 		goto close_fd;
 	}
 
@@ -3163,14 +3589,14 @@ static int dsm(int argc, char **argv, struct command *cmd, struct plugin *plugin
 	if (err < 0)
 		perror("data-set management");
 	else if (err != 0)
-		fprintf(stderr, "NVME IO command error:%s(%x)\n",
-				nvme_status_to_string(err), err);
+		nvme_show_status(err);
 	else
 		printf("NVMe DSM: success\n");
 
- close_fd:
+close_fd:
 	close(fd);
-	return err;
+ret:
+	return nvme_status_to_errno(err, false);
 }
 
 static int flush(int argc, char **argv, struct command *cmd, struct plugin *plugin)
@@ -3191,27 +3617,34 @@ static int flush(int argc, char **argv, struct command *cmd, struct plugin *plug
 		.namespace_id = NVME_NSID_ALL,
 	};
 
-	const struct argconfig_commandline_options command_line_options[] = {
-		{"namespace-id", 'n', "NUM",  CFG_POSITIVE,    &cfg.namespace_id, required_argument, namespace_id},
-		{NULL}
+	OPT_ARGS(opts) = {
+		OPT_UINT("namespace-id", 'n', &cfg.namespace_id, namespace_id),
+		OPT_END()
 	};
 
-	fd = parse_and_open(argc, argv, desc, command_line_options, &cfg, sizeof(cfg));
+	err = fd = parse_and_open(argc, argv, desc, opts);
 	if (fd < 0)
-		return fd;
+		goto ret;
 
-	if (S_ISBLK(nvme_stat.st_mode))
-		cfg.namespace_id = get_nsid(fd);
+	if (!cfg.namespace_id) {
+		cfg.namespace_id = nvme_get_nsid(fd);
+		if (cfg.namespace_id < 0) {
+			err = cfg.namespace_id;
+			goto close_fd;
+		}
+	}
+
 	err = nvme_flush(fd, cfg.namespace_id);
 	if (err < 0)
 		perror("flush");
 	else if (err != 0)
-		fprintf(stderr, "NVME IO command error:%s(%x)\n",
-				nvme_status_to_string(err), err);
+		nvme_show_status(err);
 	else
 		printf("NVMe Flush: success\n");
+close_fd:
 	close(fd);
-	return err;
+ret:
+	return nvme_status_to_errno(err, false);
 }
 
 static int resv_acquire(int argc, char **argv, struct command *cmd, struct plugin *plugin)
@@ -3247,28 +3680,30 @@ static int resv_acquire(int argc, char **argv, struct command *cmd, struct plugi
 		.racqa        = 0,
 	};
 
-	const struct argconfig_commandline_options command_line_options[] = {
-		{"namespace-id", 'n', "NUM", CFG_POSITIVE,    &cfg.namespace_id, required_argument, namespace_id},
-		{"crkey",        'c', "NUM", CFG_LONG_SUFFIX, &cfg.crkey,        required_argument, crkey},
-		{"prkey",        'p', "NUM", CFG_LONG_SUFFIX, &cfg.prkey,        required_argument, prkey},
-		{"rtype",        't', "NUM", CFG_BYTE,        &cfg.rtype,        required_argument, rtype},
-		{"racqa",        'a', "NUM", CFG_BYTE,        &cfg.racqa,        required_argument, racqa},
-		{"iekey",        'i', "",    CFG_NONE,        &cfg.iekey,        no_argument,       iekey},
-		{NULL}
+	OPT_ARGS(opts) = {
+		OPT_UINT("namespace-id", 'n', &cfg.namespace_id, namespace_id),
+		OPT_LONG("crkey",        'c', &cfg.crkey,        crkey),
+		OPT_LONG("prkey",        'p', &cfg.prkey,        prkey),
+		OPT_BYTE("rtype",        't', &cfg.rtype,        rtype),
+		OPT_BYTE("racqa",        'a', &cfg.racqa,        racqa),
+		OPT_FLAG("iekey",        'i', &cfg.iekey,        iekey),
+		OPT_END()
 	};
 
-	fd = parse_and_open(argc, argv, desc, command_line_options, &cfg, sizeof(cfg));
+	err = fd = parse_and_open(argc, argv, desc, opts);
 	if (fd < 0)
-		return fd;
+		goto ret;
 
 	if (!cfg.namespace_id) {
-		cfg.namespace_id = get_nsid(fd);
-		if (cfg.namespace_id <= 0)
-			return EINVAL;
+		cfg.namespace_id = nvme_get_nsid(fd);
+		if (cfg.namespace_id < 0) {
+			err = cfg.namespace_id;
+			goto close_fd;
+		}
 	}
 	if (cfg.racqa > 7) {
 		fprintf(stderr, "invalid racqa:%d\n", cfg.racqa);
-		err = EINVAL;
+		err = -EINVAL;
 		goto close_fd;
 	}
 
@@ -3277,13 +3712,14 @@ static int resv_acquire(int argc, char **argv, struct command *cmd, struct plugi
 	if (err < 0)
 		perror("reservation acquire");
 	else if (err != 0)
-		fprintf(stderr, "NVME IO command error:%s(%x)\n", nvme_status_to_string(err), err);
+		nvme_show_status(err);
 	else
 		printf("NVME Reservation Acquire success\n");
 
- close_fd:
+close_fd:
 	close(fd);
-	return err;
+ret:
+	return nvme_status_to_errno(err, false);
 }
 
 static int resv_register(int argc, char **argv, struct command *cmd, struct plugin *plugin)
@@ -3316,28 +3752,36 @@ static int resv_register(int argc, char **argv, struct command *cmd, struct plug
 		.cptpl        = 0,
 	};
 
-	const struct argconfig_commandline_options command_line_options[] = {
-		{"namespace-id", 'n', "NUM", CFG_POSITIVE,    &cfg.namespace_id, required_argument, namespace_id},
-		{"crkey",        'c', "NUM", CFG_LONG_SUFFIX, &cfg.crkey,        required_argument, crkey},
-		{"nrkey",        'k', "NUM", CFG_LONG_SUFFIX, &cfg.nrkey,        required_argument, nrkey},
-		{"rrega",        'r', "NUM", CFG_BYTE,        &cfg.rrega,        required_argument, rrega},
-		{"cptpl",        'p', "NUM", CFG_BYTE,        &cfg.cptpl,        required_argument, cptpl},
-		{"iekey",        'i', "",    CFG_NONE,        &cfg.iekey,        no_argument,       iekey},
-		{NULL}
+	OPT_ARGS(opts) = {
+		OPT_UINT("namespace-id", 'n', &cfg.namespace_id, namespace_id),
+		OPT_LONG("crkey",        'c', &cfg.crkey,        crkey),
+		OPT_LONG("nrkey",        'k', &cfg.nrkey,        nrkey),
+		OPT_BYTE("rrega",        'r', &cfg.rrega,        rrega),
+		OPT_BYTE("cptpl",        'p', &cfg.cptpl,        cptpl),
+		OPT_FLAG("iekey",        'i', &cfg.iekey,        iekey),
+		OPT_END()
 	};
 
-	fd = parse_and_open(argc, argv, desc, command_line_options, &cfg, sizeof(cfg));
+	err = fd = parse_and_open(argc, argv, desc, opts);
 	if (fd < 0)
-		return fd;
+		goto ret;
 
 	if (!cfg.namespace_id) {
-		cfg.namespace_id = get_nsid(fd);
-		if (cfg.namespace_id <= 0)
-			return EINVAL;
+		cfg.namespace_id = nvme_get_nsid(fd);
+		if (cfg.namespace_id < 0) {
+			err = cfg.namespace_id;
+			goto close_fd;
+		}
 	}
 	if (cfg.cptpl > 3) {
 		fprintf(stderr, "invalid cptpl:%d\n", cfg.cptpl);
-		err = EINVAL;
+		err = -EINVAL;
+		goto close_fd;
+	}
+
+	if (cfg.rrega > 7) {
+		fprintf(stderr, "invalid rrega:%d\n", cfg.rrega);
+		err = -EINVAL;
 		goto close_fd;
 	}
 
@@ -3346,13 +3790,14 @@ static int resv_register(int argc, char **argv, struct command *cmd, struct plug
 	if (err < 0)
 		perror("reservation register");
 	else if (err != 0)
-		fprintf(stderr, "NVME IO command error:%s(%x)\n", nvme_status_to_string(err), err);
+		nvme_show_status(err);
 	else
 		printf("NVME Reservation  success\n");
 
- close_fd:
+close_fd:
 	close(fd);
-	return err;
+ret:
+	return nvme_status_to_errno(err, false);
 }
 
 static int resv_release(int argc, char **argv, struct command *cmd, struct plugin *plugin)
@@ -3388,27 +3833,29 @@ static int resv_release(int argc, char **argv, struct command *cmd, struct plugi
 		.iekey        = 0,
 	};
 
-	const struct argconfig_commandline_options command_line_options[] = {
-		{"namespace-id", 'n', "NUM",  CFG_POSITIVE,    &cfg.namespace_id, required_argument, namespace_id},
-		{"crkey",        'c', "NUM",  CFG_LONG_SUFFIX, &cfg.crkey,        required_argument, crkey},
-		{"rtype",        't', "NUM",  CFG_BYTE,        &cfg.rtype,        required_argument, rtype},
-		{"rrela",        'a', "NUM",  CFG_BYTE,        &cfg.rrela,        required_argument, rrela},
-		{"iekey",        'i', "",     CFG_NONE,        &cfg.iekey,        no_argument, iekey},
-		{NULL}
+	OPT_ARGS(opts) = {
+		OPT_UINT("namespace-id", 'n', &cfg.namespace_id, namespace_id),
+		OPT_LONG("crkey",        'c', &cfg.crkey,        crkey),
+		OPT_BYTE("rtype",        't', &cfg.rtype,        rtype),
+		OPT_BYTE("rrela",        'a', &cfg.rrela,        rrela),
+		OPT_FLAG("iekey",        'i', &cfg.iekey,        iekey),
+		OPT_END()
 	};
 
-	fd = parse_and_open(argc, argv, desc, command_line_options, &cfg, sizeof(cfg));
+	err = fd = parse_and_open(argc, argv, desc, opts);
 	if (fd < 0)
-		return fd;
+		goto ret;
 
 	if (!cfg.namespace_id) {
-		cfg.namespace_id = get_nsid(fd);
-		if (cfg.namespace_id <= 0)
-			return EINVAL;
+		cfg.namespace_id = nvme_get_nsid(fd);
+		if (cfg.namespace_id < 0) {
+			err = cfg.namespace_id;
+			goto close_fd;
+		}
 	}
 	if (cfg.rrela > 7) {
 		fprintf(stderr, "invalid rrela:%d\n", cfg.rrela);
-		err = EINVAL;
+		err = -EINVAL;
 		goto close_fd;
 	}
 
@@ -3417,13 +3864,14 @@ static int resv_release(int argc, char **argv, struct command *cmd, struct plugi
 	if (err < 0)
 		perror("reservation release");
 	else if (err != 0)
-		fprintf(stderr, "NVME IO command error:%s(%x)\n", nvme_status_to_string(err), err);
+		nvme_show_status(err);
 	else
 		printf("NVME Reservation Release success\n");
 
- close_fd:
+close_fd:
 	close(fd);
-	return err;
+ret:
+	return nvme_status_to_errno(err, false);
 }
 
 static int resv_report(int argc, char **argv, struct command *cmd, struct plugin *plugin)
@@ -3436,10 +3884,11 @@ static int resv_report(int argc, char **argv, struct command *cmd, struct plugin
 	const char *namespace_id = "identifier of desired namespace";
 	const char *numd = "number of dwords to transfer";
 	const char *cdw11 = "command dword 11 value";
-	const char *raw_binary = "dump output in binary format";
+	const char *raw = "dump output in binary format";
 
-	int err, fmt, fd;
 	struct nvme_reservation_status *status;
+	enum nvme_print_flags flags;
+	int err, fd, size;
 
 	struct config {
 		__u32 namespace_id;
@@ -3456,63 +3905,66 @@ static int resv_report(int argc, char **argv, struct command *cmd, struct plugin
 		.output_format = "normal",
 	};
 
-	const struct argconfig_commandline_options command_line_options[] = {
-		{"namespace-id",  'n', "NUM", CFG_POSITIVE, &cfg.namespace_id,  required_argument, namespace_id},
-		{"numd",          'd', "NUM", CFG_POSITIVE, &cfg.numd,          required_argument, numd},
-		{"cdw11",         'c', "NUM", CFG_POSITIVE, &cfg.cdw11,         required_argument, cdw11},
-		{"raw-binary",    'b', "",    CFG_NONE,     &cfg.raw_binary,    no_argument,       raw_binary},
-		{"output-format", 'o', "FMT", CFG_STRING,   &cfg.output_format, required_argument, output_format },
-		{NULL}
+	OPT_ARGS(opts) = {
+		OPT_UINT("namespace-id",  'n', &cfg.namespace_id,   namespace_id),
+		OPT_UINT("numd",          'd', &cfg.numd,           numd),
+		OPT_UINT("cdw11",         'c', &cfg.cdw11,          cdw11),
+		OPT_FMT("output-format",  'o', &cfg.output_format,  output_format),
+		OPT_FLAG("raw-binary",    'b', &cfg.raw_binary,     raw),
+		OPT_END()
 	};
 
-	fd = parse_and_open(argc, argv, desc, command_line_options, &cfg, sizeof(cfg));
+	err = fd = parse_and_open(argc, argv, desc, opts);
 	if (fd < 0)
-		return fd;
+		goto ret;
 
-	fmt = validate_output_format(cfg.output_format);
-	if (fmt < 0) {
-		err = fmt;
+	err = flags = validate_output_format(cfg.output_format);
+	if (flags < 0)
 		goto close_fd;
-	}
 	if (cfg.raw_binary)
-		fmt = BINARY;
+		flags = BINARY;
 
 	if (!cfg.namespace_id) {
-		cfg.namespace_id = get_nsid(fd);
-		if (cfg.namespace_id <= 0)
-			return EINVAL;
-	}
-	if (!cfg.numd || cfg.numd > (0x1000 >> 2))
-		cfg.numd = 0x1000 >> 2;
-	if (cfg.numd < 3)
-		cfg.numd = 3; /* get the header fields at least */
-
-	if (posix_memalign((void **)&status, getpagesize(), cfg.numd << 2)) {
-		fprintf(stderr, "No memory for resv report:%d\n", cfg.numd << 2);
-		err = ENOMEM;
-		goto close_fd;
-	}
-	memset(status, 0, cfg.numd << 2);
-
-	err = nvme_resv_report(fd, cfg.namespace_id, cfg.numd, cfg.cdw11, status);
-	if (err < 0)
-		perror("reservation report");
-	else if (err != 0)
-		fprintf(stderr, "NVME IO command error:%04x\n", err);
-	else {
-		if (fmt == BINARY)
-			d_raw((unsigned char *)status, cfg.numd << 2);
-		else if (fmt == JSON)
-			json_nvme_resv_report(status, cfg.numd << 2, cfg.cdw11);
-		else {
-			printf("NVME Reservation Report success\n");
-			show_nvme_resv_report(status, cfg.numd << 2, cfg.cdw11);
+		cfg.namespace_id = nvme_get_nsid(fd);
+		if (cfg.namespace_id < 0) {
+			err = cfg.namespace_id;
+			goto close_fd;
 		}
 	}
-	free(status);
 
- close_fd:
+	if (!cfg.numd || cfg.numd >= (0x1000 >> 2))
+		cfg.numd = (0x1000 >> 2) - 1;
+	if (cfg.numd < 3)
+		cfg.numd = 3;
+
+	size = (cfg.numd + 1) << 2;
+
+	if (posix_memalign((void **)&status, getpagesize(), size)) {
+		fprintf(stderr, "No memory for resv report:%d\n", size);
+		err = -ENOMEM;
+		goto close_fd;
+	}
+	memset(status, 0, size);
+
+	err = nvme_resv_report(fd, cfg.namespace_id, cfg.numd, cfg.cdw11, status);
+	if (!err)
+		nvme_show_resv_report(status, size, cfg.cdw11, flags);
+	else if (err > 0)
+		fprintf(stderr, "NVME IO command error:%04x\n", err);
+	else
+		perror("reservation report");
+	free(status);
+close_fd:
 	close(fd);
+ret:
+	return nvme_status_to_errno(err, false);
+}
+
+static unsigned long long elapsed_utime(struct timeval start_time,
+					struct timeval end_time)
+{
+	unsigned long long err = (end_time.tv_sec - start_time.tv_sec) * 1000000 +
+		(end_time.tv_usec - start_time.tv_usec);
 	return err;
 }
 
@@ -3529,6 +3981,7 @@ static int submit_io(int opcode, char *command, const char *desc,
 	__u32 dsmgmt = 0;
 	int phys_sector_size = 0;
 	long long buffer_size = 0;
+	bool huge;
 
 	const char *start_block = "64-bit addr of first block to access";
 	const char *block_count = "number of blocks (zeroes based) on device to access";
@@ -3583,35 +4036,35 @@ static int submit_io(int opcode, char *command, const char *desc,
 		.app_tag         = 0,
 	};
 
-	const struct argconfig_commandline_options command_line_options[] = {
-		{"start-block",       's', "NUM",  CFG_LONG_SUFFIX, &cfg.start_block,       required_argument, start_block},
-		{"block-count",       'c', "NUM",  CFG_SHORT,       &cfg.block_count,       required_argument, block_count},
-		{"data-size",         'z', "NUM",  CFG_LONG_SUFFIX, &cfg.data_size,         required_argument, data_size},
-		{"metadata-size",     'y', "NUM",  CFG_LONG_SUFFIX, &cfg.metadata_size,     required_argument, metadata_size},
-		{"ref-tag",           'r', "NUM",  CFG_POSITIVE,    &cfg.ref_tag,           required_argument, ref_tag},
-		{"data",              'd', "FILE", CFG_STRING,      &cfg.data,              required_argument, data},
-		{"metadata",          'M', "FILE", CFG_STRING,      &cfg.metadata,          required_argument, metadata},
-		{"prinfo",            'p', "NUM",  CFG_BYTE,        &cfg.prinfo,            required_argument, prinfo},
-		{"app-tag-mask",      'm', "NUM",  CFG_SHORT,       &cfg.app_tag_mask,      required_argument, app_tag_mask},
-		{"app-tag",           'a', "NUM",  CFG_SHORT,       &cfg.app_tag,           required_argument, app_tag},
-		{"limited-retry",     'l', "",     CFG_NONE,        &cfg.limited_retry,     no_argument,       limited_retry},
-		{"force-unit-access", 'f', "",     CFG_NONE,        &cfg.force_unit_access, no_argument,       force},
-		{"dir-type",          'T', "NUM",  CFG_BYTE,        &cfg.dtype,             required_argument, dtype},
-		{"dir-spec",          'S', "NUM",  CFG_SHORT,       &cfg.dspec,             required_argument, dspec},
-		{"dsm",               'D', "NUM",  CFG_SHORT,       &cfg.dsmgmt,            required_argument, dsm},
-		{"show-command",      'v', "",     CFG_NONE,        &cfg.show,              no_argument,       show},
-		{"dry-run",           'w', "",     CFG_NONE,        &cfg.dry_run,           no_argument,       dry},
-		{"latency",           't', "",     CFG_NONE,        &cfg.latency,           no_argument,       latency},
-		{NULL}
+	OPT_ARGS(opts) = {
+		OPT_SUFFIX("start-block",     's', &cfg.start_block,       start_block),
+		OPT_SHRT("block-count",       'c', &cfg.block_count,       block_count),
+		OPT_SUFFIX("data-size",       'z', &cfg.data_size,         data_size),
+		OPT_SUFFIX("metadata-size",   'y', &cfg.metadata_size,     metadata_size),
+		OPT_UINT("ref-tag",           'r', &cfg.ref_tag,           ref_tag),
+		OPT_FILE("data",              'd', &cfg.data,              data),
+		OPT_FILE("metadata",          'M', &cfg.metadata,          metadata),
+		OPT_BYTE("prinfo",            'p', &cfg.prinfo,            prinfo),
+		OPT_SHRT("app-tag-mask",      'm', &cfg.app_tag_mask,      app_tag_mask),
+		OPT_SHRT("app-tag",           'a', &cfg.app_tag,           app_tag),
+		OPT_FLAG("limited-retry",     'l', &cfg.limited_retry,     limited_retry),
+		OPT_FLAG("force-unit-access", 'f', &cfg.force_unit_access, force),
+		OPT_BYTE("dir-type",          'T', &cfg.dtype,             dtype),
+		OPT_SHRT("dir-spec",          'S', &cfg.dspec,             dspec),
+		OPT_SHRT("dsm",               'D', &cfg.dsmgmt,            dsm),
+		OPT_FLAG("show-command",      'v', &cfg.show,              show),
+		OPT_FLAG("dry-run",           'w', &cfg.dry_run,           dry),
+		OPT_FLAG("latency",           't', &cfg.latency,           latency),
+		OPT_END()
 	};
 
-	fd = parse_and_open(argc, argv, desc, command_line_options, &cfg, sizeof(cfg));
+	err = fd = parse_and_open(argc, argv, desc, opts);
 	if (fd < 0)
-		return fd;
+		goto ret;
 
 	dfd = mfd = opcode & 1 ? STDIN_FILENO : STDOUT_FILENO;
 	if (cfg.prinfo > 0xf) {
-		err = EINVAL;
+		err = -EINVAL;
 		goto close_fd;
 	}
 
@@ -3625,34 +4078,34 @@ static int submit_io(int opcode, char *command, const char *desc,
 		if (cfg.dtype > 0xf) {
 			fprintf(stderr, "Invalid directive type, %x\n",
 				cfg.dtype);
-			err = EINVAL;
+			err = -EINVAL;
 			goto close_fd;
 		}
 		control |= cfg.dtype << 4;
 		dsmgmt |= ((__u32)cfg.dspec) << 16;
 	}
-	
-	if (strlen(cfg.data)){
+
+	if (strlen(cfg.data)) {
 		dfd = open(cfg.data, flags, mode);
 		if (dfd < 0) {
 			perror(cfg.data);
-			err = EINVAL;
+			err = -EINVAL;
 			goto close_fd;
 		}
 		mfd = dfd;
 	}
-	if (strlen(cfg.metadata)){
+	if (strlen(cfg.metadata)) {
 		mfd = open(cfg.metadata, flags, mode);
 		if (mfd < 0) {
 			perror(cfg.metadata);
-			err = EINVAL;
+			err = -EINVAL;
 			goto close_dfd;
 		}
 	}
 
 	if (!cfg.data_size)	{
 		fprintf(stderr, "data size not provided\n");
-		err = EINVAL;
+		err = -EINVAL;
 		goto close_mfd;
 	}
 
@@ -3667,33 +4120,42 @@ static int submit_io(int opcode, char *command, const char *desc,
 		buffer_size = cfg.data_size;
 	}
 
-	if (posix_memalign(&buffer, getpagesize(), buffer_size)) {
+	buffer = nvme_alloc(buffer_size, &huge);
+	if (!buffer) {
 		fprintf(stderr, "can not allocate io payload\n");
-		err = ENOMEM;
+		err = -ENOMEM;
 		goto close_mfd;
 	}
-	memset(buffer, 0, cfg.data_size);
 
 	if (cfg.metadata_size) {
 		mbuffer = malloc(cfg.metadata_size);
 		if (!mbuffer) {
-			fprintf(stderr, "can not allocate io metadata payload\n");
-			err = ENOMEM;
+			fprintf(stderr, "can not allocate io metadata "
+					"payload: %s\n", strerror(errno));
+			err = -ENOMEM;
 			goto free_buffer;
+		}
+		memset(mbuffer, 0, cfg.metadata_size);
+	}
+
+	if ((opcode & 1)) {
+		err = read(dfd, (void *)buffer, cfg.data_size);
+		if (err < 0) {
+			err = -errno;
+			fprintf(stderr, "failed to read data buffer from input"
+					" file %s\n", strerror(errno));
+			goto free_mbuffer;
 		}
 	}
 
-	if ((opcode & 1) && read(dfd, (void *)buffer, cfg.data_size) < 0) {
-		fprintf(stderr, "failed to read data buffer from input file\n");
-		err = EINVAL;
-		goto free_mbuffer;
-	}
-
-	if ((opcode & 1) && cfg.metadata_size &&
-				read(mfd, (void *)mbuffer, cfg.metadata_size) < 0) {
-		fprintf(stderr, "failed to read meta-data buffer from input file\n");
-		err = EINVAL;
-		goto free_mbuffer;
+	if ((opcode & 1) && cfg.metadata_size) {
+		err = read(mfd, (void *)mbuffer, cfg.metadata_size);
+		if (err < 0) {
+			err = -errno;
+			fprintf(stderr, "failed to read meta-data buffer from"
+					" input file %s\n", strerror(errno));
+			goto free_mbuffer;
+		}
 	}
 
 	if (cfg.show) {
@@ -3704,14 +4166,14 @@ static int submit_io(int opcode, char *command, const char *desc,
 		printf("rsvd         : %04x\n", 0);
 		printf("metadata     : %"PRIx64"\n", (uint64_t)(uintptr_t)mbuffer);
 		printf("addr         : %"PRIx64"\n", (uint64_t)(uintptr_t)buffer);
-		printf("sbla         : %"PRIx64"\n", (uint64_t)cfg.start_block);
+		printf("slba         : %"PRIx64"\n", (uint64_t)cfg.start_block);
 		printf("dsmgmt       : %08x\n", dsmgmt);
 		printf("reftag       : %08x\n", cfg.ref_tag);
 		printf("apptag       : %04x\n", cfg.app_tag);
 		printf("appmask      : %04x\n", cfg.app_tag_mask);
-		if (cfg.dry_run)
-			goto free_mbuffer;
 	}
+	if (cfg.dry_run)
+		goto free_mbuffer;
 
 	gettimeofday(&start_time, NULL);
 	err = nvme_io(fd, opcode, cfg.start_block, cfg.block_count, control, dsmgmt,
@@ -3723,32 +4185,35 @@ static int submit_io(int opcode, char *command, const char *desc,
 	if (err < 0)
 		perror("submit-io");
 	else if (err)
-		printf("%s:%s(%04x)\n", command, nvme_status_to_string(err), err);
+		nvme_show_status(err);
 	else {
 		if (!(opcode & 1) && write(dfd, (void *)buffer, cfg.data_size) < 0) {
-			fprintf(stderr, "failed to write buffer to output file\n");
-			err = EINVAL;
+			fprintf(stderr, "write: %s: failed to write buffer to output file\n",
+					strerror(errno));
+			err = -EINVAL;
 		} else if (!(opcode & 1) && cfg.metadata_size &&
 				write(mfd, (void *)mbuffer, cfg.metadata_size) < 0) {
-			fprintf(stderr, "failed to write meta-data buffer to output file\n");
-			err = EINVAL;
+			fprintf(stderr, "write: %s: failed to write meta-data buffer to output file\n",
+					strerror(errno));
+			err = -EINVAL;
 		} else
 			fprintf(stderr, "%s: Success\n", command);
 	}
 
- free_mbuffer:
+free_mbuffer:
 	if (cfg.metadata_size)
 		free(mbuffer);
- free_buffer:
-	free(buffer);
- close_mfd:
+free_buffer:
+	nvme_free(buffer, huge);
+close_mfd:
 	if (strlen(cfg.metadata))
 		close(mfd);
- close_dfd:
+close_dfd:
 	close(dfd);
- close_fd:
+close_fd:
 	close(fd);
-	return err;
+ret:
+	return nvme_status_to_errno(err, false);
 }
 
 static int compare(int argc, char **argv, struct command *cmd, struct plugin *plugin)
@@ -3774,6 +4239,96 @@ static int write_cmd(int argc, char **argv, struct command *cmd, struct plugin *
 	return submit_io(nvme_cmd_write, "write", desc, argc, argv);
 }
 
+static int verify_cmd(int argc, char **argv, struct command *cmd, struct plugin *plugin)
+{
+	int err, fd;
+	__u16 control = 0;
+	const char *desc = "Verify specified logical blocks on the given device.";
+	const char *namespace_id = "desired namespace";
+	const char *start_block = "64-bit LBA of first block to access";
+	const char *block_count = "number of blocks (zeroes based) on device to access";
+	const char *limited_retry = "limit media access attempts";
+	const char *force = "force device to commit cached data before performing the verify operation";
+	const char *prinfo = "PI and check field";
+	const char *ref_tag = "reference tag (for end to end PI)";
+	const char *app_tag_mask = "app tag mask (for end to end PI)";
+	const char *app_tag = "app tag (for end to end PI)";
+
+	struct config {
+		__u64 start_block;
+		__u32 namespace_id;
+		__u32 ref_tag;
+		__u16 app_tag;
+		__u16 app_tag_mask;
+		__u16 block_count;
+		__u8  prinfo;
+		int   limited_retry;
+		int   force_unit_access;
+	};
+
+	struct config cfg = {
+		.namespace_id      = 0,
+		.start_block       = 0,
+		.block_count       = 0,
+		.prinfo            = 0,
+		.ref_tag           = 0,
+		.app_tag           = 0,
+		.app_tag_mask      = 0,
+		.limited_retry     = 0,
+		.force_unit_access = 0,
+	};
+
+	OPT_ARGS(opts) = {
+		OPT_UINT("namespace-id",      'n', &cfg.namespace_id,      namespace_id),
+		OPT_SUFFIX("start-block",     's', &cfg.start_block,       start_block),
+		OPT_SHRT("block-count",       'c', &cfg.block_count,       block_count),
+		OPT_FLAG("limited-retry",     'l', &cfg.limited_retry,     limited_retry),
+		OPT_FLAG("force-unit-access", 'f', &cfg.force_unit_access, force),
+		OPT_BYTE("prinfo",            'p', &cfg.prinfo,            prinfo),
+		OPT_UINT("ref-tag",           'r', &cfg.ref_tag,           ref_tag),
+		OPT_SHRT("app-tag",           'a', &cfg.app_tag,           app_tag),
+		OPT_SHRT("app-tag-mask",      'm', &cfg.app_tag_mask,      app_tag_mask),
+		OPT_END()
+	};
+
+	err = fd = parse_and_open(argc, argv, desc, opts);
+	if (fd < 0)
+		goto err;
+
+	if (cfg.prinfo > 0xf) {
+		err = EINVAL;
+		goto close_fd;
+	}
+
+	control |= (cfg.prinfo << 10);
+	if (cfg.limited_retry)
+		control |= NVME_RW_LR;
+	if (cfg.force_unit_access)
+		control |= NVME_RW_FUA;
+
+	if (!cfg.namespace_id) {
+		cfg.namespace_id = nvme_get_nsid(fd);
+		if (cfg.namespace_id < 0) {
+			err = cfg.namespace_id;
+			goto close_fd;
+		}
+	}
+
+	err = nvme_verify(fd, cfg.namespace_id, cfg.start_block, cfg.block_count,
+				control, cfg.ref_tag, cfg.app_tag, cfg.app_tag_mask);
+	if (err < 0)
+		perror("verify");
+	else if (err != 0)
+		nvme_show_status(err);
+	else
+		printf("NVME Verify Success\n");
+
+close_fd:
+	close(fd);
+err:
+	return err;
+}
+
 static int sec_recv(int argc, char **argv, struct command *cmd, struct plugin *plugin)
 {
 	const char *desc = "Obtain results of one or more "\
@@ -3786,7 +4341,7 @@ static int sec_recv(int argc, char **argv, struct command *cmd, struct plugin *p
 	const char *secp = "security protocol (cf. SPC-4)";
 	const char *spsp = "security-protocol-specific (cf. SPC-4)";
 	const char *al = "allocation length (cf. SPC-4)";
-	const char *raw_binary = "dump output in binary format";
+	const char *raw = "dump output in binary format";
 	const char *namespace_id = "desired namespace";
 	const char *nssf = "NVMe Security Specific Field";
 	int err, fd;
@@ -3810,26 +4365,26 @@ static int sec_recv(int argc, char **argv, struct command *cmd, struct plugin *p
 		.al   = 0,
 	};
 
-	const struct argconfig_commandline_options command_line_options[] = {
-		{"namespace-id", 'n', "NUM", CFG_POSITIVE, &cfg.namespace_id, required_argument, namespace_id},
-		{"size",         'x', "NUM", CFG_POSITIVE, &cfg.size,         required_argument, size},
-		{"nssf",         'N', "NUM", CFG_BYTE,     &cfg.nssf,         required_argument, nssf},
-		{"secp",         'p', "NUM", CFG_BYTE,     &cfg.secp,         required_argument, secp},
-		{"spsp",         's', "NUM", CFG_SHORT,    &cfg.spsp,         required_argument, spsp},
-		{"al",           't', "NUM", CFG_POSITIVE, &cfg.al,           required_argument, al},
-		{"raw-binary",   'b', "",    CFG_NONE,     &cfg.raw_binary,   no_argument,       raw_binary},
-		{NULL}
+	OPT_ARGS(opts) = {
+		OPT_UINT("namespace-id", 'n', &cfg.namespace_id, namespace_id),
+		OPT_UINT("size",         'x', &cfg.size,         size),
+		OPT_BYTE("nssf",         'N', &cfg.nssf,         nssf),
+		OPT_BYTE("secp",         'p', &cfg.secp,         secp),
+		OPT_SHRT("spsp",         's', &cfg.spsp,         spsp),
+		OPT_UINT("al",           't', &cfg.al,           al),
+		OPT_FLAG("raw-binary",   'b', &cfg.raw_binary,   raw),
+		OPT_END()
 	};
 
-	fd = parse_and_open(argc, argv, desc, command_line_options, &cfg, sizeof(cfg));
+	err = fd = parse_and_open(argc, argv, desc, opts);
 	if (fd < 0)
-		return fd;
+		goto ret;
 
 	if (cfg.size) {
 		if (posix_memalign(&sec_buf, getpagesize(), cfg.size)) {
 			fprintf(stderr, "No memory for security size:%d\n",
 								cfg.size);
-			err = ENOMEM;
+			err = -ENOMEM;
 			goto close_fd;
 		}
 	}
@@ -3852,140 +4407,215 @@ static int sec_recv(int argc, char **argv, struct command *cmd, struct plugin *p
 
 	free(sec_buf);
 
- close_fd:
+close_fd:
 	close(fd);
-	return err;
+ret:
+	return nvme_status_to_errno(err, false);
+}
+
+static int get_lba_status(int argc, char **argv, struct command *cmd,
+		struct plugin *plugin)
+{
+	const char *desc = "Information about potentially unrecoverable LBAs.";
+	const char *slba = "Starting LBA(SLBA) in 64-bit address of the first"\
+			    " logical block addressed by this command";
+	const char *mndw = "Maximum Number of Dwords(MNDW) specifies maximum"\
+			    " number of dwords to return";
+	const char *atype = "Action Type(ATYPE) specifies the mechanism the"\
+			     " the controller uses in determining the LBA"\
+			     " Status Descriptors to return.";
+	const char *rl = "Range Length(RL) specifies the length of the range"\
+			  " of contiguous LBAs beginning at SLBA";
+
+	enum nvme_print_flags flags;
+	unsigned long buf_len;
+	int err, fd;
+	void *buf;
+
+	struct config {
+		__u64 slba;
+		__u32 mndw;
+		__u8 atype;
+		__u16 rl;
+		char *output_format;
+	};
+
+	struct config cfg = {
+		.slba = 0,
+		.mndw = 0,
+		.atype = 0,
+		.rl = 0,
+		.output_format = "normal",
+	};
+
+	OPT_ARGS(opts) = {
+		OPT_SUFFIX("start-lba",  's', &cfg.slba,          slba),
+		OPT_UINT("max-dw",       'm', &cfg.mndw,          mndw),
+		OPT_BYTE("action",       'a', &cfg.atype,         atype),
+		OPT_SHRT("range-len",    'l', &cfg.rl,            rl),
+		OPT_FMT("output-format", 'o', &cfg.output_format, output_format),
+		OPT_END()
+	};
+
+	err = fd = parse_and_open(argc, argv, desc, opts);
+	if (fd < 0)
+		goto err;
+
+	err = flags = validate_output_format(cfg.output_format);
+	if (flags < 0)
+		goto close_fd;
+
+	if (!cfg.atype) {
+		fprintf(stderr, "action type (--action) has to be given\n");
+		err = -EINVAL;
+		goto close_fd;
+	}
+
+	buf_len = (cfg.mndw + 1) * 4;
+	buf = calloc(1, buf_len);
+	if (!buf) {
+		err = -ENOMEM;
+		goto close_fd;
+	}
+
+	err = nvme_get_lba_status(fd, cfg.slba, cfg.mndw, cfg.atype, cfg.rl,
+			buf);
+	if (!err)
+		nvme_show_lba_status(buf, buf_len, flags);
+	else if (err > 0)
+		fprintf(stderr, "NVME command error:%04x\n", err);
+	else
+		perror("get lba status");
+	free(buf);
+close_fd:
+	close(fd);
+err:
+	return nvme_status_to_errno(err, false);
 }
 
 static int dir_receive(int argc, char **argv, struct command *cmd, struct plugin *plugin)
 {
-        const char *desc = "Read directive parameters of the "\
-                "specified directive type.";
-        const char *raw_binary = "show infos in binary format";
-        const char *namespace_id = "identifier of desired namespace";
-        const char *data_len = "buffer len (if) data is returned";
-        const char *dtype = "directive type";
-        const char *dspec = "directive specification associated with directive type";
-        const char *doper = "directive operation";
-        const char *nsr = "namespace stream requested";
-        const char *human_readable = "show infos in readable format";
-        int err, fd;
-        __u32 result;
-        __u32 dw12 = 0;
-        void *buf = NULL;
+	const char *desc = "Read directive parameters of the "\
+			    "specified directive type.";
+	const char *raw = "show directive in binary format";
+	const char *namespace_id = "identifier of desired namespace";
+	const char *data_len = "buffer len (if) data is returned";
+	const char *dtype = "directive type";
+	const char *dspec = "directive specification associated with directive type";
+	const char *doper = "directive operation";
+	const char *nsr = "namespace stream requested";
+	const char *human_readable = "show directive in readable format";
 
-        struct config {
-                __u32 namespace_id;
-                __u32 data_len;
-                __u16 dspec;
-                __u8  dtype;
-                __u8  doper;
-                __u16 nsr; /* dw12 for NVME_DIR_ST_RCVOP_STATUS */
-                int  raw_binary;
-                int  human_readable;
-        };
+	enum nvme_print_flags flags = NORMAL;
+	int err, fd;
+	__u32 result;
+	__u32 dw12 = 0;
+	void *buf = NULL;
 
-        struct config cfg = {
-                .namespace_id = 1,
-                .data_len     = 0,
-                .dspec        = 0,
-                .dtype        = 0,
-                .doper        = 0,
-                .nsr          = 0,
-        };
+	struct config {
+		__u32 namespace_id;
+		__u32 data_len;
+		__u16 dspec;
+		__u8  dtype;
+		__u8  doper;
+		__u16 nsr; /* dw12 for NVME_DIR_ST_RCVOP_STATUS */
+		int  raw_binary;
+		int  human_readable;
+	};
 
-        const struct argconfig_commandline_options command_line_options[] = {
-                {"namespace-id",   'n', "NUM", CFG_POSITIVE, &cfg.namespace_id,   required_argument, namespace_id},
-                {"data-len",       'l', "NUM", CFG_POSITIVE, &cfg.data_len,       required_argument, data_len},
-                {"raw-binary",     'b', "FLAG",CFG_NONE,     &cfg.raw_binary,     no_argument,       raw_binary},
-                {"dir-type",       'D', "NUM", CFG_BYTE,     &cfg.dtype,          required_argument, dtype},
-                {"dir-spec",       'S', "NUM", CFG_SHORT,    &cfg.dspec,          required_argument, dspec},
-                {"dir-oper",       'O', "NUM", CFG_BYTE,     &cfg.doper,          required_argument, doper},
-                {"req-resource",   'r', "NUM", CFG_SHORT,    &cfg.nsr,            required_argument, nsr},
-                {"human-readable", 'H', "FLAG",CFG_NONE,     &cfg.human_readable, no_argument,       human_readable},
-                {NULL}
-        };
+	struct config cfg = {
+		.namespace_id = 1,
+		.data_len     = 0,
+		.dspec        = 0,
+		.dtype        = 0,
+		.doper        = 0,
+		.nsr          = 0,
+	};
 
-        fd = parse_and_open(argc, argv, desc, command_line_options, &cfg, sizeof(cfg));
+	OPT_ARGS(opts) = {
+		OPT_UINT("namespace-id",  'n', &cfg.namespace_id,   namespace_id),
+		OPT_UINT("data-len",      'l', &cfg.data_len,       data_len),
+		OPT_FLAG("raw-binary",    'b', &cfg.raw_binary,     raw),
+		OPT_BYTE("dir-type",      'D', &cfg.dtype,          dtype),
+		OPT_SHRT("dir-spec",      'S', &cfg.dspec,          dspec),
+		OPT_BYTE("dir-oper",      'O', &cfg.doper,          doper),
+		OPT_SHRT("req-resource",  'r', &cfg.nsr,            nsr),
+		OPT_FLAG("human-readable",'H', &cfg.human_readable, human_readable),
+		OPT_END()
+	};
+
+	err = fd = parse_and_open(argc, argv, desc, opts);
 	if (fd < 0)
-		return fd;
+		goto ret;
 
-        switch (cfg.dtype) {
-        case NVME_DIR_IDENTIFY:
-                switch (cfg.doper) {
-                case NVME_DIR_RCV_ID_OP_PARAM:
-                        if (!cfg.data_len)
-                                cfg.data_len = 4096;
-                        break;
-                default:
-                        fprintf(stderr, "invalid directive operations for Identify Directives\n");
-                        err = EINVAL;
-			goto close_fd;
-                }
-                break;
-        case NVME_DIR_STREAMS:
-                switch (cfg.doper) {
-                case NVME_DIR_RCV_ST_OP_PARAM:
-                        if (!cfg.data_len)
-                                cfg.data_len = 32;
-                        break;
-                case NVME_DIR_RCV_ST_OP_STATUS:
-                        if (!cfg.data_len)
-                                cfg.data_len = 128 * 1024;
-                        break;
-                case NVME_DIR_RCV_ST_OP_RESOURCE:
-                        dw12 = cfg.nsr;
-                        break;
-                default:
-                        fprintf(stderr, "invalid directive operations for Streams Directives\n");
-                        err = EINVAL;
-			goto close_fd;
-                }
-                break;
-        default:
-                fprintf(stderr, "invalid directive type\n");
-                err = EINVAL;
-		goto close_fd;
-        }
+	if (cfg.human_readable)
+		flags |= VERBOSE;
+	if (cfg.raw_binary)
+		flags = BINARY;
 
-        if (cfg.data_len) {
-                if (posix_memalign(&buf, getpagesize(), cfg.data_len)) {
-			err = ENOMEM;
+	switch (cfg.dtype) {
+	case NVME_DIR_IDENTIFY:
+		switch (cfg.doper) {
+		case NVME_DIR_RCV_ID_OP_PARAM:
+			if (!cfg.data_len)
+				cfg.data_len = 4096;
+			break;
+		default:
+			fprintf(stderr, "invalid directive operations for Identify Directives\n");
+			err = -EINVAL;
 			goto close_fd;
 		}
-                memset(buf, 0, cfg.data_len);
-        }
+		break;
+	case NVME_DIR_STREAMS:
+		switch (cfg.doper) {
+		case NVME_DIR_RCV_ST_OP_PARAM:
+			if (!cfg.data_len)
+				cfg.data_len = 32;
+			break;
+		case NVME_DIR_RCV_ST_OP_STATUS:
+			if (!cfg.data_len)
+				cfg.data_len = 128 * 1024;
+			break;
+		case NVME_DIR_RCV_ST_OP_RESOURCE:
+			dw12 = cfg.nsr;
+			break;
+		default:
+			fprintf(stderr, "invalid directive operations for Streams Directives\n");
+			err = -EINVAL;
+			goto close_fd;
+		}
+		break;
+	default:
+		fprintf(stderr, "invalid directive type\n");
+		err = -EINVAL;
+		goto close_fd;
+	}
 
-        err = nvme_dir_recv(fd, cfg.namespace_id, cfg.dspec, cfg.dtype, cfg.doper,
-                        cfg.data_len, dw12, buf, &result);
-        if (err < 0) {
-                perror("dir-receive");
-		goto free;
-        }
+	if (cfg.data_len) {
+		if (posix_memalign(&buf, getpagesize(), cfg.data_len)) {
+			err = -ENOMEM;
+			goto close_fd;
+		}
+		memset(buf, 0, cfg.data_len);
+	}
 
-        if (!err) {
-                printf("dir-receive: type %#x, operation %#x, spec %#x, nsid %#x, result %#x \n",
-                                cfg.dtype, cfg.doper, cfg.dspec, cfg.namespace_id, result);
-                if (cfg.human_readable)
-                        nvme_directive_show_fields(cfg.dtype, cfg.doper, result, buf);
-                else {
-                        if (buf) {
-                                if (!cfg.raw_binary)
-                                        d(buf, cfg.data_len, 16, 1);
-                                else
-                                        d_raw(buf, cfg.data_len);
-                        }
-                }
-        }
-        else if (err > 0)
-                fprintf(stderr, "NVMe Status:%s(%x)\n",
-                                nvme_status_to_string(err), err);
- free:
+	err = nvme_dir_recv(fd, cfg.namespace_id, cfg.dspec, cfg.dtype, cfg.doper,
+			cfg.data_len, dw12, buf, &result);
+	if (!err)
+		nvme_directive_show(cfg.dtype, cfg.doper, cfg.dspec,
+				    cfg.namespace_id, result, buf, cfg.data_len,
+				    flags);
+	else if (err > 0)
+		nvme_show_status(err);
+	else if (err < 0)
+		perror("dir-receive");
+
 	if (cfg.data_len)
 		free(buf);
- close_fd:
+close_fd:
 	close(fd);
-	return err;
+ret:
+	return nvme_status_to_errno(err, false);
 }
 
 static int passthru(int argc, char **argv, int ioctl_cmd, const char *desc, struct command *cmd)
@@ -3993,6 +4623,7 @@ static int passthru(int argc, char **argv, int ioctl_cmd, const char *desc, stru
 	void *data = NULL, *metadata = NULL;
 	int err = 0, wfd = STDIN_FILENO, fd;
 	__u32 result;
+	bool huge;
 
 	struct config {
 		__u8  opcode;
@@ -4060,44 +4691,44 @@ static int passthru(int argc, char **argv, int ioctl_cmd, const char *desc, stru
 	const char *dry = "show command instead of sending";
 	const char *re = "set dataflow direction to receive";
 	const char *wr = "set dataflow direction to send";
-	const char *prefill = "prefill buffer with known byte-value, default 0";
+	const char *prefill = "prefill buffers with known byte-value, default 0";
 
-	const struct argconfig_commandline_options command_line_options[] = {
-		{"opcode",       'o', "NUM",  CFG_BYTE,     &cfg.opcode,       required_argument, opcode},
-		{"flags",        'f', "NUM",  CFG_BYTE,     &cfg.flags,        required_argument, flags},
-		{"prefill",      'p', "NUM",  CFG_BYTE,     &cfg.prefill,      required_argument, prefill},
-		{"rsvd",         'R', "NUM",  CFG_SHORT,    &cfg.rsvd,         required_argument, rsvd},
-		{"namespace-id", 'n', "NUM",  CFG_POSITIVE, &cfg.namespace_id, required_argument, namespace_id},
-		{"data-len",     'l', "NUM",  CFG_POSITIVE, &cfg.data_len,     required_argument, data_len},
-		{"metadata-len", 'm', "NUM",  CFG_POSITIVE, &cfg.metadata_len, required_argument, metadata_len},
-		{"timeout",      't', "NUM",  CFG_POSITIVE, &cfg.timeout,      required_argument, timeout},
-		{"cdw2",         '2', "NUM",  CFG_POSITIVE, &cfg.cdw2,         required_argument, cdw2},
-		{"cdw3",         '3', "NUM",  CFG_POSITIVE, &cfg.cdw3,         required_argument, cdw3},
-		{"cdw10",        '4', "NUM",  CFG_POSITIVE, &cfg.cdw10,        required_argument, cdw10},
-		{"cdw11",        '5', "NUM",  CFG_POSITIVE, &cfg.cdw11,        required_argument, cdw11},
-		{"cdw12",        '6', "NUM",  CFG_POSITIVE, &cfg.cdw12,        required_argument, cdw12},
-		{"cdw13",        '7', "NUM",  CFG_POSITIVE, &cfg.cdw13,        required_argument, cdw13},
-		{"cdw14",        '8', "NUM",  CFG_POSITIVE, &cfg.cdw14,        required_argument, cdw14},
-		{"cdw15",        '9', "NUM",  CFG_POSITIVE, &cfg.cdw15,        required_argument, cdw15},
-		{"input-file",   'i', "FILE", CFG_STRING,   &cfg.input_file,   required_argument, input},
-		{"raw-binary",   'b', "",     CFG_NONE,     &cfg.raw_binary,   no_argument,       raw_binary},
-		{"show-command", 's', "",     CFG_NONE,     &cfg.show_command, no_argument,       show},
-		{"dry-run",      'd', "",     CFG_NONE,     &cfg.dry_run,      no_argument,       dry},
-		{"read",         'r', "",     CFG_NONE,     &cfg.read,         no_argument,       re},
-		{"write",        'w', "",     CFG_NONE,     &cfg.write,        no_argument,       wr},
-		{NULL}
+	OPT_ARGS(opts) = {
+		OPT_BYTE("opcode",       'o', &cfg.opcode,       opcode),
+		OPT_BYTE("flags",        'f', &cfg.flags,        flags),
+		OPT_BYTE("prefill",      'p', &cfg.prefill,      prefill),
+		OPT_SHRT("rsvd",         'R', &cfg.rsvd,         rsvd),
+		OPT_UINT("namespace-id", 'n', &cfg.namespace_id, namespace_id),
+		OPT_UINT("data-len",     'l', &cfg.data_len,     data_len),
+		OPT_UINT("metadata-len", 'm', &cfg.metadata_len, metadata_len),
+		OPT_UINT("timeout",      't', &cfg.timeout,      timeout),
+		OPT_UINT("cdw2",         '2', &cfg.cdw2,         cdw2),
+		OPT_UINT("cdw3",         '3', &cfg.cdw3,         cdw3),
+		OPT_UINT("cdw10",        '4', &cfg.cdw10,        cdw10),
+		OPT_UINT("cdw11",        '5', &cfg.cdw11,        cdw11),
+		OPT_UINT("cdw12",        '6', &cfg.cdw12,        cdw12),
+		OPT_UINT("cdw13",        '7', &cfg.cdw13,        cdw13),
+		OPT_UINT("cdw14",        '8', &cfg.cdw14,        cdw14),
+		OPT_UINT("cdw15",        '9', &cfg.cdw15,        cdw15),
+		OPT_FILE("input-file",   'i', &cfg.input_file,   input),
+		OPT_FLAG("raw-binary",   'b', &cfg.raw_binary,   raw_binary),
+		OPT_FLAG("show-command", 's', &cfg.show_command, show),
+		OPT_FLAG("dry-run",      'd', &cfg.dry_run,      dry),
+		OPT_FLAG("read",         'r', &cfg.read,         re),
+		OPT_FLAG("write",        'w', &cfg.write,        wr),
+		OPT_END()
 	};
 
-	fd = parse_and_open(argc, argv, desc, command_line_options, &cfg, sizeof(cfg));
+	err = fd = parse_and_open(argc, argv, desc, opts);
 	if (fd < 0)
-		return fd;
+		goto ret;
 
 	if (strlen(cfg.input_file)){
 		wfd = open(cfg.input_file, O_RDONLY,
 			   S_IRUSR | S_IRGRP | S_IROTH);
 		if (wfd < 0) {
 			perror(cfg.input_file);
-			err = EINVAL;
+			err = -EINVAL;
 			goto close_fd;
 		}
 	}
@@ -4105,29 +4736,39 @@ static int passthru(int argc, char **argv, int ioctl_cmd, const char *desc, stru
 	if (cfg.metadata_len) {
 		metadata = malloc(cfg.metadata_len);
 		if (!metadata) {
-			fprintf(stderr, "can not allocate metadata payload\n");
-			err = ENOMEM;
-			goto close_fd;
+			fprintf(stderr, "can not allocate metadata "
+					"payload: %s\n", strerror(errno));
+			err = -ENOMEM;
+			goto close_wfd;
 		}
+		memset(metadata, cfg.prefill, cfg.metadata_len);
 	}
 	if (cfg.data_len) {
-		if (posix_memalign(&data, getpagesize(), cfg.data_len)) {
-			if (metadata)
-				free(metadata);
+		data = nvme_alloc(cfg.data_len, &huge);
+		if (!data) {
 			fprintf(stderr, "can not allocate data payload\n");
-			err = ENOMEM;
+			err = -ENOMEM;
 			goto free_metadata;
+		}
+
+		if (cfg.write && !(cfg.opcode & 0x01)) {
+			fprintf(stderr, "warning: write flag set but write direction bit is not set in the opcode\n");
+		}
+
+		if (cfg.read && !(cfg.opcode & 0x02)) {
+			fprintf(stderr, "warning: read flag set but read direction bit is not set in the opcode\n");
 		}
 
 		memset(data, cfg.prefill, cfg.data_len);
 		if (!cfg.read && !cfg.write) {
 			fprintf(stderr, "data direction not given\n");
-			err = EINVAL;
+			err = -EINVAL;
 			goto free_data;
 		} else if (cfg.write) {
 			if (read(wfd, data, cfg.data_len) < 0) {
-				fprintf(stderr, "failed to read write buffer\n");
-				err = EINVAL;
+				err = -errno;
+				fprintf(stderr, "failed to read write buffer "
+						"%s\n", strerror(errno));
 				goto free_data;
 			}
 		}
@@ -4151,9 +4792,9 @@ static int passthru(int argc, char **argv, int ioctl_cmd, const char *desc, stru
 		printf("cdw14        : %08x\n", cfg.cdw14);
 		printf("cdw15        : %08x\n", cfg.cdw15);
 		printf("timeout_ms   : %08x\n", cfg.timeout);
-		if (cfg.dry_run)
-			goto free_data;
 	}
+	if (cfg.dry_run)
+		goto free_data;
 
 	err = nvme_passthru(fd, ioctl_cmd, cfg.opcode, cfg.flags, cfg.rsvd,
 				cfg.namespace_id, cfg.cdw2, cfg.cdw3, cfg.cdw10,
@@ -4163,8 +4804,7 @@ static int passthru(int argc, char **argv, int ioctl_cmd, const char *desc, stru
 	if (err < 0)
 		perror("passthru");
 	else if (err)
-		fprintf(stderr, "NVMe Status:%s(%x) Command Result:%08x\n",
-				nvme_status_to_string(err), err, result);
+		nvme_show_status(err);
 	else  {
 		if (!cfg.raw_binary) {
 			fprintf(stderr, "NVMe command result:%08x\n", result);
@@ -4173,16 +4813,19 @@ static int passthru(int argc, char **argv, int ioctl_cmd, const char *desc, stru
 		} else if (data && cfg.read)
 			d_raw((unsigned char *)data, cfg.data_len);
 	}
-
- free_data:
+free_data:
 	if (cfg.data_len)
-		free(data);
- free_metadata:
+		nvme_free(data, huge);
+free_metadata:
 	if (cfg.metadata_len)
 		free(metadata);
- close_fd:
+close_wfd:
+	if (strlen(cfg.input_file))
+		close(wfd);
+close_fd:
 	close(fd);
-	return err;
+ret:
+	return nvme_status_to_errno(err, false);
 }
 
 static int io_passthru(int argc, char **argv, struct command *cmd, struct plugin *plugin)
@@ -4219,41 +4862,61 @@ static int gen_hostnqn_cmd(int argc, char **argv, struct command *command, struc
 }
 #endif
 
+static int show_hostnqn_cmd(int argc, char **argv, struct command *command, struct plugin *plugin)
+{
+	char *hostnqn;
+
+	hostnqn = hostnqn_read();
+	if (hostnqn) {
+		fputs(hostnqn, stdout);
+		free(hostnqn);
+		return 0;
+	} else {
+		fprintf(stderr, "hostnqn is not available -- use nvme gen-hostnqn\n");
+		return -ENOENT;
+	}
+}
+
 static int discover_cmd(int argc, char **argv, struct command *command, struct plugin *plugin)
 {
 	const char *desc = "Send Get Log Page request to Discovery Controller.";
-	return discover(desc, argc, argv, false);
+	return fabrics_discover(desc, argc, argv, false);
 }
 
 static int connect_all_cmd(int argc, char **argv, struct command *command, struct plugin *plugin)
 {
 	const char *desc = "Discover NVMeoF subsystems and connect to them";
-	return discover(desc, argc, argv, true);
+	return fabrics_discover(desc, argc, argv, true);
 }
 
 static int connect_cmd(int argc, char **argv, struct command *command, struct plugin *plugin)
 {
 	const char *desc = "Connect to NVMeoF subsystem";
-	return _connect(desc, argc, argv);
+	return fabrics_connect(desc, argc, argv);
 }
 
 static int disconnect_cmd(int argc, char **argv, struct command *command, struct plugin *plugin)
 {
 	const char *desc = "Disconnect from NVMeoF subsystem";
-	return disconnect(desc, argc, argv);
+	return fabrics_disconnect(desc, argc, argv);
+}
+
+static int disconnect_all_cmd(int argc, char **argv, struct command *command, struct plugin *plugin)
+{
+	const char *desc = "Disconnect from all connected NVMeoF subsystems";
+	return fabrics_disconnect_all(desc, argc, argv);
 }
 
 void register_extension(struct plugin *plugin)
 {
 	plugin->parent = &nvme;
-
 	nvme.extensions->tail->next = plugin;
 	nvme.extensions->tail = plugin;
 }
 
 int main(int argc, char **argv)
 {
-	int ret;
+	int err;
 
 	nvme.extensions->parent = &nvme;
 	if (argc < 2) {
@@ -4262,11 +4925,12 @@ int main(int argc, char **argv)
 	}
 	setlocale(LC_ALL, "");
 
-	ret = handle_plugin(argc - 1, &argv[1], nvme.extensions);
-	if (ret == -ENOTTY)
+	err = handle_plugin(argc - 1, &argv[1], nvme.extensions);
+	if (err == -ENOTTY)
 		general_help(&builtin);
+
 
 	close_dev(global_device);
 
-	return ret;
+	return err;
 }
