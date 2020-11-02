@@ -25,12 +25,16 @@
 #include <stdio.h>
 #include <unistd.h>
 #include <inttypes.h>
+#include <errno.h>
 #include "nvme-device.h"
 #include "switchtec-nvme-device.h"
 
 #include <switchtec/switchtec.h>
 #include <switchtec/fabric.h>
 #include <switchtec/mrpc.h>
+#include <switchtec/errors.h>
+
+#define INVALID_MRPC_CMD (SWITCHTEC_ERRNO_MRPC_FLAG_BIT | ERR_CMD_INVALID)
 
 struct switchtec_device_manage_nvme_req
 {
@@ -48,8 +52,19 @@ struct switchtec_device_manage_nvme_rsp
 	uint8_t nvme_data[SWITCHTEC_DEVICE_MANAGE_MAX_RESP - (4 * 4)];
 };
 
+struct switchtec_admin_passthru_nvme_req {
+	uint32_t nvme_sqe[16];
+	uint8_t nvme_data[SWITCHTEC_NVME_ADMIN_PASSTHRU_MAX_DATA_LEN -
+				(16 * 4)];
+};
 
-int pax_nvme_submit_admin_passthru(int fd, struct nvme_passthru_cmd *cmd)
+struct switchtec_admin_passthru_nvme_rsp {
+	uint32_t nvme_cqe[4];
+	uint8_t nvme_data[4096];
+};
+
+int pax_nvme_submit_admin_passthru_1k_rsp(int fd,
+					  struct nvme_passthru_cmd *cmd)
 {
 	int ret;
 
@@ -81,11 +96,8 @@ int pax_nvme_submit_admin_passthru(int fd, struct nvme_passthru_cmd *cmd)
 	ret = switchtec_device_manage(pax->dev,
 				     (struct switchtec_device_manage_req *)&req,
 				     (struct switchtec_device_manage_rsp *)&rsp);
-
-	if (ret) {
-		switchtec_perror("device_manage_cmd");
+	if (ret)
 		return ret;
-	}
 
 	status = (rsp.nvme_cqe[3] & 0xfffe0000) >> 17;
 	if (!status) {
@@ -98,6 +110,67 @@ int pax_nvme_submit_admin_passthru(int fd, struct nvme_passthru_cmd *cmd)
 	}
 
 	return status;
+}
+
+int pax_nvme_submit_admin_passthru_4k_rsp(int fd,
+					  struct nvme_passthru_cmd *cmd)
+{
+	int ret;
+
+	struct pax_nvme_device *pax;
+	struct switchtec_admin_passthru_nvme_req req;
+	struct switchtec_admin_passthru_nvme_rsp rsp;
+	size_t data_len;
+	size_t rsp_len;
+	int status;
+
+	memset(&req, 0, sizeof(req));
+	memset(&rsp, 0, sizeof(rsp));
+	pax = to_pax_nvme_device(global_device);
+
+	memcpy(&req.nvme_sqe, cmd, 16 * 4);
+
+	/* sqe[9] should be 0 per spec */
+	req.nvme_sqe[9] = 0;
+
+	if (cmd->data_len > sizeof(req.nvme_data))
+		data_len = sizeof(req.nvme_data);
+	else
+		data_len = cmd->data_len;
+
+	memcpy(req.nvme_data, (void *)cmd->addr, data_len);
+	data_len = data_len + 16 * 4;
+
+	rsp_len = (sizeof(rsp.nvme_cqe) + cmd->data_len);
+
+	ret = switchtec_nvme_admin_passthru(pax->dev, pax->pdfid,
+					    data_len, &req,
+					    &rsp_len, &rsp);
+	if (ret)
+		return ret;
+
+	status = (rsp.nvme_cqe[3] & 0xfffe0000) >> 17;
+	if (!status) {
+		cmd->result = rsp.nvme_cqe[0];
+		if (cmd->addr) {
+			memcpy((uint64_t *)cmd->addr,
+				rsp.nvme_data,
+				rsp_len - 4 * 4);
+		}
+	}
+
+	return status;
+}
+
+int pax_nvme_submit_admin_passthru(int fd, struct nvme_passthru_cmd *cmd)
+{
+	int ret;
+
+	ret = pax_nvme_submit_admin_passthru_4k_rsp(fd, cmd);
+	if (ret && errno == INVALID_MRPC_CMD)
+		ret = pax_nvme_submit_admin_passthru_1k_rsp(fd, cmd);
+
+	return ret;
 }
 
 int pax_nvme_io(int fd, struct nvme_user_io *io)
