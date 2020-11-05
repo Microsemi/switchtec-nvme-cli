@@ -148,7 +148,7 @@ static int scan_namespace(struct nvme_namespace *n)
 	if (ret < 0)
 		return ret;
 
-	fd = open(path, O_RDONLY);
+	fd = open_global_device(path);
 	if (fd < 0)
 		goto free;
 
@@ -160,7 +160,7 @@ static int scan_namespace(struct nvme_namespace *n)
 	if (ret < 0)
 		goto close_fd;
 close_fd:
-	close(fd);
+	close_global_device();
 free:
 	free(path);
 	return 0;
@@ -364,14 +364,14 @@ static int verify_legacy_ns(struct nvme_namespace *n)
 		}
 	}
 
-	fd = open(path, O_RDONLY);
+	fd = open_global_device(path);
 	free (path);
 
 	if (fd < 0)
 		return fd;
 
 	ret = nvme_identify_ctrl(fd, &id);
-	close(fd);
+	close_global_device();
 
 	if (ret)
 		return ret;
@@ -426,10 +426,10 @@ static int legacy_list(struct nvme_topology *t)
 			continue;
 		ret = 0;
 
-		fd = open(path, O_RDONLY);
-		if (fd > 0) {
+		fd = open_global_device(path);
+		if (fd >= 0) {
 			nvme_identify_ctrl(fd, &c->id);
-			close(fd);
+			close_global_device();
 		}
 		free(path);
 

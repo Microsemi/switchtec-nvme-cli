@@ -148,7 +148,7 @@ static void *nvme_alloc(size_t len, bool *huge)
 
 extern struct nvme_device *global_device;
 
-static int open_dev(char *dev)
+int open_global_device(char *dev)
 {
 	int err, fd;
 	char device_str[64];
@@ -214,6 +214,7 @@ static int open_dev(char *dev)
 		}
 
 		rc = malloc(sizeof(struct rc_nvme_device));
+		rc->fd = fd;
 		rc->device.ops = &rc_ops;
 		global_device = &rc->device;
 		global_device->type = NVME_DEVICE_TYPE_RC;
@@ -227,14 +228,16 @@ perror:
 	return err;
 }
 
-int close_dev(struct nvme_device *device)
+int close_global_device()
 {
-	if (!device)
+	struct rc_nvme_device *rc;
+
+	if (!global_device)
 		return 0;
 
-	if (device->type == NVME_DEVICE_TYPE_PAX) {
+	if (global_device->type == NVME_DEVICE_TYPE_PAX) {
 		struct pax_nvme_device *pax;
-		pax = to_pax_nvme_device(device);
+		pax = to_pax_nvme_device(global_device);
 
 		if (pax->channel_status == SWITCHTEC_EP_TUNNEL_DISABLED)
 			switchtec_ep_tunnel_disable(pax->dev, pax->pdfid);
@@ -242,12 +245,14 @@ int close_dev(struct nvme_device *device)
 		switchtec_close(pax->dev);
 		free(pax);
 
+		global_device = NULL;
 		return 0;
-	} else if (device->type == NVME_DEVICE_TYPE_RC) {
-		struct rc_nvme_device *rc;
-		rc = to_rc_nvme_device(device);
+	} else if (global_device->type == NVME_DEVICE_TYPE_RC) {
+		rc = to_rc_nvme_device(global_device);
+		close(rc->fd);
 		free(rc);
 
+		global_device = NULL;
 		return 0;
 	}
 
@@ -272,7 +277,7 @@ static int get_dev(int argc, char **argv)
 	if (ret)
 		return ret;
 
-	return open_dev(argv[optind]);
+	return open_global_device(argv[optind]);
 }
 
 int parse_and_open(int argc, char **argv, const char *desc,
@@ -4930,7 +4935,7 @@ int main(int argc, char **argv)
 		general_help(&builtin);
 
 
-	close_dev(global_device);
+	close_global_device();
 
 	return err;
 }
