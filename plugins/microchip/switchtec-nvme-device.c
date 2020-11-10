@@ -71,7 +71,7 @@ int pax_nvme_submit_admin_passthru_1k_rsp(int fd,
 	struct pax_nvme_device *pax;
 	struct switchtec_device_manage_nvme_req req;
 	struct switchtec_device_manage_nvme_rsp rsp;
-	int data_len;
+	size_t data_len = 0;
 	int status;
 
 	memset(&req, 0, sizeof(req));
@@ -84,12 +84,14 @@ int pax_nvme_submit_admin_passthru_1k_rsp(int fd,
 	/* sqe[9] should be 0 per spec */
 	req.nvme_sqe[9] = 0;
 
-	if (cmd->data_len > sizeof(req.nvme_data))
-		data_len = sizeof(req.nvme_data);
-	else
-		data_len = cmd->data_len;
+	if (cmd->opcode & 0x1) {
+		if (cmd->data_len > sizeof(req.nvme_data))
+			data_len = sizeof(req.nvme_data);
+		else
+			data_len = cmd->data_len;
 
-	memcpy(req.nvme_data, (void *)cmd->addr, data_len);
+		memcpy(req.nvme_data, (void *)cmd->addr, data_len);
+	}
 
 	req.hdr.expected_rsp_len = (sizeof(rsp.nvme_cqe) + sizeof(rsp.nvme_data));
 
@@ -120,7 +122,7 @@ int pax_nvme_submit_admin_passthru_4k_rsp(int fd,
 	struct pax_nvme_device *pax;
 	struct switchtec_admin_passthru_nvme_req req;
 	struct switchtec_admin_passthru_nvme_rsp rsp;
-	size_t data_len;
+	size_t data_len = 0;
 	size_t rsp_len;
 	int status;
 
@@ -133,12 +135,15 @@ int pax_nvme_submit_admin_passthru_4k_rsp(int fd,
 	/* sqe[9] should be 0 per spec */
 	req.nvme_sqe[9] = 0;
 
-	if (cmd->data_len > sizeof(req.nvme_data))
-		data_len = sizeof(req.nvme_data);
-	else
-		data_len = cmd->data_len;
+	if (cmd->opcode & 0x1) {
+		if (cmd->data_len > sizeof(req.nvme_data))
+			data_len = sizeof(req.nvme_data);
+		else
+			data_len = cmd->data_len;
 
-	memcpy(req.nvme_data, (void *)cmd->addr, data_len);
+		memcpy(req.nvme_data, (void *)cmd->addr, data_len);
+	}
+
 	data_len = data_len + 16 * 4;
 
 	rsp_len = (sizeof(rsp.nvme_cqe) + cmd->data_len);
