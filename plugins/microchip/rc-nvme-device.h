@@ -28,6 +28,7 @@
 #include "nvme-device.h"
 
 struct rc_nvme_device {
+	int fd;
 	struct nvme_device device;
 };
 
