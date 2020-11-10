@@ -178,7 +178,6 @@ int open_global_device(char *dev)
 		if (!pax->dev) {
 			switchtec_perror(device_str);
 			free(pax);
-			printf("return here\n");
 			global_device  = NULL;
 			return -ENODEV;
 		}
