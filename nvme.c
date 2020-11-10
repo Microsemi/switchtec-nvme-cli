@@ -2318,8 +2318,8 @@ static int fw_download(int argc, char **argv, struct command *cmd, struct plugin
 	}
 
 	buf = fw_buf;
-	if (cfg.xfer == 0 || cfg.xfer % 4096)
-		cfg.xfer = 4096;
+
+	cfg.xfer = 512;
 	if (read(fw_fd, fw_buf, fw_size) != ((ssize_t)(fw_size))) {
 		err = -errno;
 		fprintf(stderr, "read :%s :%s\n", cfg.fw, strerror(errno));
