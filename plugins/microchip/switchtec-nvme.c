@@ -79,7 +79,7 @@ int get_nvme_info(int fd, struct list_item *item, const char *node)
 	if (item->nsid <= 0)
 		return item->nsid;
 	err = nvme_identify_ns(fd, item->nsid,
-			       0, &item->ns);
+			       1, &item->ns);
 	if (err)
 		return err;
 	strcpy(item->node, node);
