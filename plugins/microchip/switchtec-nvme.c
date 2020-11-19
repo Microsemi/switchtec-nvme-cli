@@ -241,17 +241,42 @@ static int scan_pax_dev_filter(const struct dirent *d)
 
 #define NVME_CLASS	0x010802
 #define CAP_PF		0x3
-static int pax_get_nvme_pf_functions(struct pax_nvme_device *pax,
-				     struct switchtec_gfms_db_ep_port_attached_device_function *functions,
-				     int max_functions)
+
+static int pax_enum_ep(struct switchtec_gfms_db_ep_port_ep *ep,
+	struct switchtec_gfms_db_ep_port_attached_device_function *functions,
+	int max_functions)
 {
-	int i, j;
+	int n;
+	int j;
+	int index = 0;
+	struct switchtec_gfms_db_ep_port_attached_device_function *function;
+
+	n = ep->ep_hdr.function_number;
+	for (j = 0; j < n; j++) {
+		function = &ep->functions[j];
+		if (function->sriov_cap_pf == CAP_PF &&
+		    function->device_class == NVME_CLASS) {
+			memcpy(&functions[index++], function,
+			       sizeof(*function));
+
+			if (index >= max_functions)
+				return index;
+		}
+	}
+
+	return index;
+}
+
+static int pax_get_nvme_pf_functions(struct pax_nvme_device *pax,
+	struct switchtec_gfms_db_ep_port_attached_device_function *functions,
+	int max_functions)
+{
+	int i;
 	int index;
 	int ret;
-	int n;
 	struct switchtec_gfms_db_pax_all pax_all;
 	struct switchtec_gfms_db_ep_port *ep_port;
-	struct switchtec_gfms_db_ep_port_attached_device_function *function;
+	struct switchtec_gfms_db_ep_port_ep *ep;
 
 	ret = switchtec_fab_gfms_db_dump_pax_all(pax->dev, &pax_all);
 	if (ret)
@@ -261,37 +286,130 @@ static int pax_get_nvme_pf_functions(struct pax_nvme_device *pax,
 	for (i = 0; i < pax_all.ep_port_all.ep_port_count; i++) {
 		ep_port = &pax_all.ep_port_all.ep_ports[i];
 		if (ep_port->port_hdr.type == SWITCHTEC_GFMS_DB_TYPE_EP) {
-			n = ep_port->ep_ep.ep_hdr.function_number;
-			for (j = 0; j < n; j++) {
-				function = &ep_port->ep_ep.functions[j];
-				if (function->sriov_cap_pf == CAP_PF
-				    && function->device_class == NVME_CLASS)
-					memcpy(&functions[index++],
-						function,
-						sizeof(*function));
-			}
+			ep = &ep_port->ep_ep;
+			ret = pax_enum_ep(ep, functions + index,
+					  max_functions - index);
+			index += ret;
 		}
 	}
 
 	return index;
 }
 
+static int pax_build_nvme_pf_list(struct pax_nvme_device *pax,
+	struct switchtec_gfms_db_ep_port_attached_device_function *functions,
+	int function_n,
+	struct list_item *list_items,
+	char *path)
+{
+	int j;
+	int k;
+	int ret;
+	int idx = 0;
+	char node[300];
+	__u32 ns_list[1024];
+
+	for (j = 0; j < function_n; j++) {
+		pax->pdfid = functions[j].pdfid;
+		ret = switchtec_ep_tunnel_status(pax->dev, pax->pdfid,
+						 &pax->channel_status);
+		if (ret)
+			switchtec_perror("Getting EP tunnel status");
+
+		if (pax->channel_status == SWITCHTEC_EP_TUNNEL_DISABLED)
+			switchtec_ep_tunnel_enable(pax->dev, pax->pdfid);
+
+		ret = nvme_identify_ns_list(0, 0, 1, ns_list);
+		if (!ret) {
+			for (k = 0; k < 1024; k++)
+				if (ns_list[k]) {
+					sprintf(node, "0x%04hxn%d@%s",
+						pax->pdfid, ns_list[k], path);
+					pax->ns_id = ns_list[k];
+					ret = get_nvme_info(0,
+							    &list_items[idx++],
+							    node);
+				}
+		} else if (ret > 0) {
+			fprintf(stderr, "NVMe Status:%s(%x) NSID:%d\n",
+					nvme_status_to_string(ret), ret, 0);
+		} else {
+			perror("id namespace list");
+		}
+
+		if (pax->channel_status == SWITCHTEC_EP_TUNNEL_DISABLED)
+			switchtec_ep_tunnel_disable(pax->dev, pax->pdfid);
+	}
+
+	return idx;
+}
+
+static int pax_get_nvme_pf_list(struct pax_nvme_device *pax,
+				struct list_item *list_items,
+				char *path)
+{
+	int i;
+	int ret;
+	int count = 0;
+	uint8_t r_type;
+	struct switchtec_fab_topo_info topo_info;
+	struct switchtec_gfms_db_fabric_general fg;
+	struct switchtec_gfms_db_ep_port_attached_device_function funcs[1024];
+
+	for(i = 0; i < SWITCHTEC_MAX_PORTS; i++)
+		topo_info.port_info_list[i].phys_port_id = 0xff;
+
+	ret = switchtec_set_pax_id(pax->dev, SWITCHTEC_PAX_ID_LOCAL);
+	if (ret)
+		return -1;
+
+	ret = switchtec_topo_info_dump(pax->dev, &topo_info);
+	if (ret)
+		return -2;
+
+	ret = switchtec_fab_gfms_db_dump_fabric_general(pax->dev, &fg);
+	if (ret)
+		return -3;
+
+	for (i = 0; i < 16; i++) {
+		if (topo_info.route_port[i] == 0xff && fg.hdr.pax_idx != i)
+			continue;
+
+		r_type = fg.body.pax_idx[i].reachable_type;
+
+		if (fg.hdr.pax_idx == i ||
+		    r_type == SWITCHTEC_GFMS_DB_REACH_UC ||
+		    r_type == SWITCHTEC_GFMS_DB_REACH_BC) {
+			ret = switchtec_set_pax_id(pax->dev, i);
+			if (ret)
+				continue;
+
+			ret = pax_get_nvme_pf_functions(pax, funcs + count,
+							1024 - count);
+			if (ret <= 0)
+				continue;
+
+			ret = pax_build_nvme_pf_list(pax, funcs + count, ret,
+						     list_items + count, path);
+			count += ret;
+		}
+	}
+
+	switchtec_set_pax_id(pax->dev, SWITCHTEC_PAX_ID_LOCAL);
+	return count;
+}
+
 static int switchtec_pax_list(int argc, char **argv, struct command *command,
 			      struct plugin *plugin)
 {
 	char path[264];
-	char node[300];
 	struct list_item *list_items;
-	unsigned int i, j, k, n;
-	int function_n;
+	unsigned int i;
+	unsigned int n;
 	unsigned int index;
-	int fd = 0;
 	int fmt, ret;
-	int err;
 	struct dirent **pax_devices;
 	struct pax_nvme_device *pax;
-	__u32 ns_list[1024] = {0};
-	struct switchtec_gfms_db_ep_port_attached_device_function functions[1024];
 
 	const char *desc = "Retrieve basic information for the given Microsemi device";
 	struct config {
@@ -351,41 +469,11 @@ static int switchtec_pax_list(int argc, char **argv, struct command *command,
 			return -ENODEV;
 		}
 		global_device = &pax->device;
-		switchtec_set_pax_id(pax->dev, SWITCHTEC_PAX_ID_LOCAL);
 
-		function_n = pax_get_nvme_pf_functions(pax, functions, 1024);
-		if(function_n < 0) {
-			switchtec_close(pax->dev);
-			free(pax);
-			continue;
-		}
-		for (j = 0; j < function_n; j++) {
-			pax->pdfid = functions[j].pdfid;
-			memset(ns_list, 0, sizeof(ns_list));
-			ret = switchtec_ep_tunnel_status(pax->dev, pax->pdfid, &pax->channel_status);
-			if (ret)
-				switchtec_perror("Getting EP tunnel status");
+		ret = pax_get_nvme_pf_list(pax, list_items + index, path);
+		if (ret > 0)
+			index += ret;
 
-			if (pax->channel_status == SWITCHTEC_EP_TUNNEL_DISABLED)
-				switchtec_ep_tunnel_enable(pax->dev, pax->pdfid);
-
-			err = nvme_identify_ns_list(0, 0, 1, ns_list);
-			if (!err) {
-				for (k = 0; k < 1024; k++)
-					if (ns_list[k]) {
-						sprintf(node, "0x%04hxn%d@%s", pax->pdfid, ns_list[k], path);
-						pax->ns_id = ns_list[k];
-						ret = get_nvme_info(fd, &list_items[index++], node);
-					}
-			} else if (err > 0)
-				fprintf(stderr, "NVMe Status:%s(%x) NSID:%d\n",
-						nvme_status_to_string(err), err, 0);
-			else
-				perror("id namespace list");
-
-			if (pax->channel_status == SWITCHTEC_EP_TUNNEL_DISABLED)
-				switchtec_ep_tunnel_disable(pax->dev, pax->pdfid);
-		}
 		switchtec_close(pax->dev);
 		free(pax);
 	}
