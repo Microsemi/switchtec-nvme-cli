@@ -271,9 +271,10 @@ static int pax_get_nvme_pf_functions(struct pax_nvme_device *pax,
 	struct switchtec_gfms_db_ep_port_attached_device_function *functions,
 	int max_functions)
 {
-	int i;
+	int i, j;
 	int index;
 	int ret;
+	int n;
 	struct switchtec_gfms_db_pax_all pax_all;
 	struct switchtec_gfms_db_ep_port *ep_port;
 	struct switchtec_gfms_db_ep_port_ep *ep;
@@ -290,6 +291,17 @@ static int pax_get_nvme_pf_functions(struct pax_nvme_device *pax,
 			ret = pax_enum_ep(ep, functions + index,
 					  max_functions - index);
 			index += ret;
+		} else if (ep_port->port_hdr.type ==
+			   SWITCHTEC_GFMS_DB_TYPE_SWITCH) {
+			n = ep_port->port_hdr.ep_count;
+
+			for (j = 0; j < n; j++) {
+				ep = ep_port->ep_switch.switch_eps + j;
+				ret = pax_enum_ep(ep, functions + index,
+						  max_functions - index);
+
+				index += ret;
+			}
 		}
 	}
 
