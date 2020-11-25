@@ -33,6 +33,7 @@
 PLUGIN(NAME("switchtec", "Switchtec specific extensions"),
 	COMMAND_LIST(
 		ENTRY("list", "List all NVMe devices and namespaces attached to Switchtec PAX switches", switchtec_pax_list)
+		ENTRY("vf-reset", "Perform a Function Level Reset (FLR) on a Virtual Function", switchtec_vf_reset)
 	)
 );
 
