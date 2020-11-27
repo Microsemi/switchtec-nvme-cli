@@ -487,6 +487,7 @@ static int switchtec_pax_list(int argc, char **argv, struct command *command,
 		if (ret > 0)
 			index += ret;
 
+		global_device = NULL;
 		switchtec_close(pax->dev);
 		free(pax);
 	}
