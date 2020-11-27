@@ -241,6 +241,7 @@ static int scan_pax_dev_filter(const struct dirent *d)
 
 #define NVME_CLASS	0x010802
 #define CAP_PF		0x3
+#define CAP_VF		0x0
 
 static int pax_enum_ep(struct switchtec_gfms_db_ep_port_ep *ep,
 	struct switchtec_gfms_db_ep_port_attached_device_function *functions,
@@ -498,4 +499,278 @@ static int switchtec_pax_list(int argc, char **argv, struct command *command,
 	free(list_items);
 
 	return 0;
+}
+
+#define NOT_FOUND	0
+#define IS_PF		1
+#define IS_VF		2
+static int pax_check_function_pdfid(struct switchtec_gfms_db_ep_port_ep *ep,
+				    uint16_t pdfid)
+{
+	int n;
+	int j;
+	int ret = NOT_FOUND;
+	struct switchtec_gfms_db_ep_port_attached_device_function *function;
+
+	n = ep->ep_hdr.function_number;
+	for (j = 0; j < n; j++) {
+		function = &ep->functions[j];
+		if (function->device_class == NVME_CLASS &&
+		    function->pdfid == pdfid) {
+			if(function->sriov_cap_pf == CAP_PF)
+				return IS_PF;
+			else if (function->sriov_cap_pf == CAP_VF)
+				return IS_VF;
+		}
+	}
+
+	return ret;
+}
+
+static int pax_check_ep_pdfid(struct switchtec_dev *dev, uint16_t pdfid)
+{
+	int i, j;
+	int ret = NOT_FOUND;
+	int n;
+	struct switchtec_gfms_db_pax_all pax_all;
+	struct switchtec_gfms_db_ep_port *ep_port;
+	struct switchtec_gfms_db_ep_port_ep *ep;
+
+	ret = switchtec_fab_gfms_db_dump_pax_all(dev, &pax_all);
+	if (ret)
+		return NOT_FOUND;
+
+	for (i = 0; i < pax_all.ep_port_all.ep_port_count; i++) {
+		ep_port = &pax_all.ep_port_all.ep_ports[i];
+		if (ep_port->port_hdr.type == SWITCHTEC_GFMS_DB_TYPE_EP) {
+			ep = &ep_port->ep_ep;
+			ret = pax_check_function_pdfid(ep, pdfid);
+			if (ret != NOT_FOUND)
+				return ret;
+		} else if (ep_port->port_hdr.type ==
+			   SWITCHTEC_GFMS_DB_TYPE_SWITCH) {
+			n = ep_port->port_hdr.ep_count;
+
+			for (j = 0; j < n; j++) {
+				ep = ep_port->ep_switch.switch_eps + j;
+				ret = pax_check_function_pdfid(ep, pdfid);
+				if (ret != NOT_FOUND)
+					return ret;
+			}
+		}
+	}
+
+	return NOT_FOUND;
+}
+
+static int pax_check_pdfid_type(struct switchtec_dev *dev, uint16_t pdfid)
+{
+	int i;
+	int ret = NOT_FOUND;
+	uint8_t r_type;
+	struct switchtec_fab_topo_info topo_info;
+	struct switchtec_gfms_db_fabric_general fg;
+
+	for(i = 0; i < SWITCHTEC_MAX_PORTS; i++)
+		topo_info.port_info_list[i].phys_port_id = 0xff;
+
+	ret = switchtec_set_pax_id(dev, SWITCHTEC_PAX_ID_LOCAL);
+	if (ret)
+		return NOT_FOUND;
+
+	ret = switchtec_topo_info_dump(dev, &topo_info);
+	if (ret)
+		return NOT_FOUND;
+
+	ret = switchtec_fab_gfms_db_dump_fabric_general(dev, &fg);
+	if (ret)
+		return NOT_FOUND;
+
+	for (i = 0; i < 16; i++) {
+		if (topo_info.route_port[i] == 0xff && fg.hdr.pax_idx != i)
+			continue;
+
+		r_type = fg.body.pax_idx[i].reachable_type;
+
+		if (fg.hdr.pax_idx == i ||
+		    r_type == SWITCHTEC_GFMS_DB_REACH_UC) {
+			ret = switchtec_set_pax_id(dev, i);
+			if (ret)
+				continue;
+
+			ret = pax_check_ep_pdfid(dev, pdfid);
+			if (ret != NOT_FOUND)
+				break;
+		}
+	}
+
+	switchtec_set_pax_id(dev, SWITCHTEC_PAX_ID_LOCAL);
+	return ret;
+}
+
+#define PCIE_CAPS_OFFSET		0x34
+#define PCIE_CAPS_OFFSET_MASK		0xfc
+#define PCIE_CAP_ID			0x10
+#define PCIE_DEVICE_CTRL_OFFSET		0x08
+#define PCIE_DEVICE_RESET_FLAG		0x8000
+#define PCIE_NEXT_CAP_OFFSET		0x01
+
+int ask_if_sure(int always_yes)
+{
+	char buf[10];
+	char *ret;
+
+	if (always_yes)
+		return 0;
+
+	fprintf(stderr, "Do you want to continue? [y/N] ");
+	fflush(stderr);
+	ret = fgets(buf, sizeof(buf), stdin);
+
+	if (!ret)
+		goto abort;
+
+	if (strcmp(buf, "y\n") == 0 || strcmp(buf, "Y\n") == 0)
+		return 0;
+
+abort:
+	fprintf(stderr, "Abort.\n");
+	errno = EINTR;
+	return -errno;
+}
+
+static int switchtec_vf_reset(int argc, char **argv, struct command *command,
+			      struct plugin *plugin)
+{
+	int ret = 0;
+	uint8_t offset;
+	uint16_t pdfid;
+	uint8_t cap_id = 0;
+	uint16_t flags;
+	char device_str[64];
+	char pdfid_str[64];
+	struct switchtec_dev *dev;
+	const char *desc = "Perform a Function Level Reset (FLR) on a Virtual Function";
+	const char *force = "The \"I know what I'm doing\" flag, skip confirmation before sending command";
+	struct config {
+		int force;
+	} cfg = {};
+
+	const struct argconfig_commandline_options opts[] = {
+		OPT_FLAG("force", 'f', &cfg.force, force),
+		{NULL}
+	};
+
+	ret = argconfig_parse(argc, argv, desc, opts);
+	if (ret < 0)
+		return ret;
+
+	if (optind >= argc) {
+		fprintf(stderr,
+			"vf-reset: DEVICE is required for this command!\n");
+		return -1;
+	}
+
+	if (sscanf(argv[optind], "%2049[^@]@%s", pdfid_str, device_str) < 2) {
+		fprintf(stderr, "vf-reset: invalid device %s\n", argv[optind]);
+		fprintf(stderr,
+			"\nNOTE: This command only supports devices in the form of 'PDFID@device',\n"
+			"where 'device' is your local device file or MOE service handle.\n"
+			"Example for local device: 0x3b01@/dev/switchtec0\n"
+			"Example for MOE access: 0x3b01@192.168.1.10:0\n");
+		fprintf(stderr,
+			"\nFor RC device, use the reset command provided by your OS instead.\n"
+			"Example: echo 1 > /sys/bus/pci/devices/${bdf_vf}/reset\n");
+		return -1;
+	}
+
+	ret = sscanf(pdfid_str, "%hx", &pdfid);
+	if (!ret) {
+		fprintf(stderr, "vf-reset: invalid device %s\n", argv[optind]);
+		return -1;
+	}
+
+	if (!cfg.force) {
+		fprintf(stderr,
+			"WARNING: This will reset the Virtual Function for %s\n\n",
+			 argv[optind]);
+	}
+	ret = ask_if_sure(cfg.force);
+	if (ret)
+		return ret;
+
+	dev = switchtec_open(device_str);
+	if (!dev) {
+		switchtec_perror(device_str);
+		return -ENODEV;
+	}
+
+	ret = pax_check_pdfid_type(dev, pdfid);
+	if (ret == IS_PF) {
+		fprintf(stderr,
+			"vf-reset error: the given device %s is a Physical Function\n",
+			argv[optind]);
+		goto close;
+	} else if (ret == NOT_FOUND) {
+		fprintf(stderr,
+			"vf-reset error: cannot find function with the given device name: %s\n",
+			argv[optind]);
+		goto close;
+	}
+
+	ret = switchtec_set_pax_id(dev, SWITCHTEC_PAX_ID_LOCAL);
+	if (ret) {
+		switchtec_perror("vf-reset");
+		goto close;
+	}
+
+	ret = switchtec_ep_csr_read8(dev, pdfid, PCIE_CAPS_OFFSET, &offset);
+	if (ret) {
+		switchtec_perror("vf-reset");
+		goto close;
+	}
+
+	offset &= PCIE_CAPS_OFFSET_MASK;
+	while (offset) {
+		ret = switchtec_ep_csr_read8(dev, pdfid, offset, &cap_id);
+		if (ret) {
+			switchtec_perror("vf-reset");
+			goto close;
+		}
+
+		if (cap_id == PCIE_CAP_ID)
+			break;
+
+		ret = switchtec_ep_csr_read8(dev, pdfid,
+					     offset + PCIE_NEXT_CAP_OFFSET,
+					     &offset);
+		if (ret) {
+			switchtec_perror("vf-reset");
+			goto close;
+		}
+	}
+
+	if(!offset) {
+		fprintf(stderr,
+			"vf-reset: cannot find PCIe Capability Structure for the given device: %s\n",
+			argv[optind]);
+		goto close;
+	}
+
+	offset += PCIE_DEVICE_CTRL_OFFSET;
+	ret = switchtec_ep_csr_read16(dev, pdfid, offset, &flags);
+	if (ret) {
+		switchtec_perror("vf-reset");
+		goto close;
+	}
+
+	flags |= PCIE_DEVICE_RESET_FLAG;
+	ret = switchtec_ep_csr_write32(dev, pdfid, flags, offset);
+	if (ret) {
+		switchtec_perror("vf-reset");
+		goto close;
+	}
+close:
+	switchtec_close(dev);
+	return ret;
 }
