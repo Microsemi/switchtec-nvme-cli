@@ -391,8 +391,7 @@ static int pax_get_nvme_pf_list(struct pax_nvme_device *pax,
 		r_type = fg.body.pax_idx[i].reachable_type;
 
 		if (fg.hdr.pax_idx == i ||
-		    r_type == SWITCHTEC_GFMS_DB_REACH_UC ||
-		    r_type == SWITCHTEC_GFMS_DB_REACH_BC) {
+		    r_type == SWITCHTEC_GFMS_DB_REACH_UC) {
 			ret = switchtec_set_pax_id(pax->dev, i);
 			if (ret)
 				continue;
