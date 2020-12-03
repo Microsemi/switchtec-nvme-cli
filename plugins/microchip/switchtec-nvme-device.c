@@ -221,10 +221,7 @@ int pax_nvme_submit_io_passthru(int fd, struct nvme_passthru_cmd *cmd)
 
 int pax_is_blk(void)
 {
-	struct pax_nvme_device *pax;
-	pax = to_pax_nvme_device(global_device);
-
-	return pax->is_blk;
+	return 0;
 }
 
 int pax_nvme_get_nsid(int fd)

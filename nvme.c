@@ -171,7 +171,6 @@ int open_global_device(char *dev)
 		pax = malloc(sizeof(struct pax_nvme_device));
 		pax->pdfid = pdfid;
 		pax->device.ops = &pax_ops;
-		pax->is_blk = 0;
 
 		pax->dev = switchtec_open(device_str);
 		if (!pax->dev) {
