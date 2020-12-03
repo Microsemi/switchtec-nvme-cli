@@ -229,10 +229,8 @@ int pax_is_blk(void)
 
 int pax_nvme_get_nsid(int fd)
 {
-	struct pax_nvme_device *pax;
-	pax = to_pax_nvme_device(global_device);
-
-	return pax->ns_id;
+	errno = -ENOTBLK;
+	return -1;
 }
 
 struct nvme_device_ops pax_ops = {
