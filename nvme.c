@@ -153,26 +153,24 @@ int open_global_device(char *dev)
 	int err, fd;
 	char device_str[64];
 	char pdfid_str[64];
-	uint16_t pdfid;
-	uint32_t ns_id;
+	long pdfid;
+	char *end;
 	struct pax_nvme_device *pax;
 	struct rc_nvme_device *rc;
-	int n;
 
 	devicename = basename(dev);
 
 	if (sscanf(dev, "%2049[^@]@%s", pdfid_str, device_str) == 2) {
-		n = sscanf(pdfid_str, "%hxn%d", &pdfid, &ns_id);
-		if (!n) {
-			return -1;
+		errno = 0;
+		pdfid = strtol(pdfid_str, &end, 0);
+		if(*end || errno || (pdfid < 0 || pdfid > 0xffff)) {
+			fprintf(stderr, "Invalid device %s\n", dev);
+			return -ENODEV;
 		}
+
 		pax = malloc(sizeof(struct pax_nvme_device));
 		pax->pdfid = pdfid;
 		pax->device.ops = &pax_ops;
-		if (n == 2) {
-			pax->is_blk = 1;
-			pax->ns_id = ns_id;
-		}
 
 		pax->dev = switchtec_open(device_str);
 		if (!pax->dev) {

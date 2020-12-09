@@ -75,7 +75,6 @@ int get_nvme_info(int fd, struct list_item *item, const char *node)
 	err = nvme_identify_ctrl(fd, &item->ctrl);
 	if (err)
 		return err;
-	item->nsid = nvme_get_nsid(fd);
 	if (item->nsid <= 0)
 		return item->nsid;
 	err = nvme_identify_ns(fd, item->nsid,
@@ -336,9 +335,10 @@ static int pax_build_nvme_pf_list(struct pax_nvme_device *pax,
 		if (!ret) {
 			for (k = 0; k < 1024; k++)
 				if (ns_list[k]) {
-					sprintf(node, "0x%04hxn%d@%s",
-						pax->pdfid, ns_list[k], path);
+					sprintf(node, "0x%04hx@%s",
+						pax->pdfid, path);
 					pax->ns_id = ns_list[k];
+					list_items[idx].nsid = ns_list[k];
 					ret = get_nvme_info(0,
 							    &list_items[idx++],
 							    node);
