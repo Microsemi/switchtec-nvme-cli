@@ -33,7 +33,6 @@
 struct pax_nvme_device {
 	struct switchtec_dev *dev;
 	uint16_t pdfid;
-	int is_blk;
 	uint32_t ns_id;
 	uint32_t channel_status;
 	struct nvme_device device;
