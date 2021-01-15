@@ -563,7 +563,8 @@ static int pax_check_ep_pdfid(struct switchtec_dev *dev, uint16_t pdfid)
 	return NOT_FOUND;
 }
 
-static int pax_check_pdfid_type(struct switchtec_dev *dev, uint16_t pdfid)
+static int pax_check_pdfid_type(struct switchtec_dev *dev, uint16_t pdfid,
+				int *pax_id)
 {
 	int i;
 	int ret = NOT_FOUND;
@@ -599,8 +600,10 @@ static int pax_check_pdfid_type(struct switchtec_dev *dev, uint16_t pdfid)
 				continue;
 
 			ret = pax_check_ep_pdfid(dev, pdfid);
-			if (ret != NOT_FOUND)
+			if (ret != NOT_FOUND) {
+				*pax_id = i;
 				break;
+			}
 		}
 	}
 
@@ -650,6 +653,7 @@ static int switchtec_vf_reset(int argc, char **argv, struct command *command,
 	char device_str[64];
 	char pdfid_str[64];
 	struct switchtec_dev *dev;
+	int pax_id = SWITCHTEC_PAX_ID_LOCAL;
 	const char *desc = "Perform a Function Level Reset (FLR) on a Virtual Function";
 	const char *force = "The \"I know what I'm doing\" flag, skip confirmation before sending command";
 	struct config {
@@ -705,7 +709,7 @@ static int switchtec_vf_reset(int argc, char **argv, struct command *command,
 		return -ENODEV;
 	}
 
-	ret = pax_check_pdfid_type(dev, pdfid);
+	ret = pax_check_pdfid_type(dev, pdfid, &pax_id);
 	if (ret == IS_PF) {
 		fprintf(stderr,
 			"vf-reset error: the given device %s is a Physical Function\n",
@@ -718,7 +722,7 @@ static int switchtec_vf_reset(int argc, char **argv, struct command *command,
 		goto close;
 	}
 
-	ret = switchtec_set_pax_id(dev, SWITCHTEC_PAX_ID_LOCAL);
+	ret = switchtec_set_pax_id(dev, pax_id);
 	if (ret) {
 		switchtec_perror("vf-reset");
 		goto close;

@@ -74,6 +74,13 @@
 struct stat nvme_stat;
 const char *devicename;
 
+#define CMD_NOT_YET_SUPPORTED() \
+{ \
+	fprintf(stderr, \
+		"Error: this command is not yet supported in the current version of switchtec-nvme utility.\n");\
+	return -1; \
+}
+
 static const char nvme_version_string[] = NVME_VERSION;
 
 static struct plugin builtin = {
@@ -339,6 +346,8 @@ static int get_smart_log(int argc, char **argv, struct command *cmd, struct plug
 		OPT_END()
 	};
 
+	CMD_NOT_YET_SUPPORTED();
+
 	err = fd = parse_and_open(argc, argv, desc, opts);
 	if (fd < 0)
 		goto ret;
@@ -389,6 +398,8 @@ static int get_ana_log(int argc, char **argv, struct command *cmd,
 		OPT_FMT("output-format", 'o', &cfg.output_format, output_format),
 		OPT_END()
 	};
+
+	CMD_NOT_YET_SUPPORTED();
 
 	err = fd = parse_and_open(argc, argv, desc, opts);
 	if (fd < 0)
@@ -464,6 +475,8 @@ static int get_telemetry_log(int argc, char **argv, struct command *cmd, struct 
 		OPT_UINT("data-area",       'd', &cfg.data_area, dgen),
 		OPT_END()
 	};
+
+	CMD_NOT_YET_SUPPORTED();
 
 	err = fd = parse_and_open(argc, argv, desc, opts);
 	if (fd < 0)
@@ -584,6 +597,8 @@ static int get_endurance_log(int argc, char **argv, struct command *cmd, struct 
 		OPT_END()
 	};
 
+	CMD_NOT_YET_SUPPORTED();
+
 	err = fd = parse_and_open(argc, argv, desc, opts);
 	if (fd < 0)
 		goto ret;
@@ -631,6 +646,8 @@ static int get_effects_log(int argc, char **argv, struct command *cmd, struct pl
 		OPT_FLAG("raw-binary",    'b', &cfg.raw_binary,     raw),
 		OPT_END()
 	};
+
+	CMD_NOT_YET_SUPPORTED();
 
 	err = fd = parse_and_open(argc, argv, desc, opts);
 	if (fd < 0)
@@ -686,6 +703,8 @@ static int get_error_log(int argc, char **argv, struct command *cmd, struct plug
 		OPT_FLAG("raw-binary",   'b', &cfg.raw_binary,    raw),
 		OPT_END()
 	};
+
+	CMD_NOT_YET_SUPPORTED();
 
 	err = fd = parse_and_open(argc, argv, desc, opts);
 	if (fd < 0)
@@ -759,6 +778,8 @@ static int get_fw_log(int argc, char **argv, struct command *cmd, struct plugin 
 		OPT_END()
 	};
 
+	CMD_NOT_YET_SUPPORTED();
+
 	err = fd = parse_and_open(argc, argv, desc, opts);
 	if (fd < 0)
 		goto ret;
@@ -806,6 +827,8 @@ static int get_changed_ns_list_log(int argc, char **argv, struct command *cmd, s
 		OPT_FLAG("raw-binary",   'b', &cfg.raw_binary,    raw),
 		OPT_END()
 	};
+
+	CMD_NOT_YET_SUPPORTED();
 
 	err = fd = parse_and_open(argc, argv, desc, opts);
 	if (fd < 0)
@@ -881,6 +904,8 @@ static int get_log(int argc, char **argv, struct command *cmd, struct plugin *pl
 		OPT_FLAG("raw-binary",   'b', &cfg.raw_binary,   raw),
 		OPT_END()
 	};
+
+	CMD_NOT_YET_SUPPORTED();
 
 	err = fd = parse_and_open(argc, argv, desc, opts);
 	if (fd < 0)
@@ -959,6 +984,8 @@ static int sanitize_log(int argc, char **argv, struct command *command, struct p
 		OPT_FLAG("raw-binary",    'b', &cfg.raw_binary,     raw),
 		OPT_END()
 	};
+
+	CMD_NOT_YET_SUPPORTED();
 
 	err = fd = parse_and_open(argc, argv, desc, opts);
 	if (fd < 0)
@@ -1374,6 +1401,8 @@ static int list_subsys(int argc, char **argv, struct command *cmd,
 		OPT_END()
 	};
 
+	CMD_NOT_YET_SUPPORTED();
+
 	err = argconfig_parse(argc, argv, desc, opts);
 	if (err < 0)
 		goto ret;
@@ -1711,6 +1740,8 @@ static int id_ns_granularity(int argc, char **argv, struct command *cmd, struct 
 		OPT_END()
 	};
 
+	CMD_NOT_YET_SUPPORTED();
+
 	err = fd = parse_and_open(argc, argv, desc, opts);
 	if (fd < 0)
 		goto ret;
@@ -1768,6 +1799,8 @@ static int id_nvmset(int argc, char **argv, struct command *cmd, struct plugin *
 		OPT_END()
 	};
 
+	CMD_NOT_YET_SUPPORTED();
+
 	err = fd = parse_and_open(argc, argv, desc, opts);
 	if (fd < 0)
 		goto ret;
@@ -1818,6 +1851,8 @@ static int id_uuid(int argc, char **argv, struct command *cmd, struct plugin *pl
 		OPT_FLAG("human-readable", 'H', &cfg.human_readable, human_readable),
 		OPT_END()
 	};
+
+	CMD_NOT_YET_SUPPORTED();
 
 	fd = parse_and_open(argc, argv, desc, opts);
 	if (fd < 0)
@@ -2035,6 +2070,8 @@ static int device_self_test(int argc, char **argv, struct command *cmd, struct p
 		OPT_END()
 	};
 
+	CMD_NOT_YET_SUPPORTED();
+
 	err = fd = parse_and_open(argc, argv, desc, opts);
 	if (fd < 0)
 		goto ret;
@@ -2085,6 +2122,8 @@ static int self_test_log(int argc, char **argv, struct command *cmd, struct plug
 		OPT_FLAG("verbose",      'v', &cfg.verbose,       verbose),
 		OPT_END()
 	};
+
+	CMD_NOT_YET_SUPPORTED();
 
 	err = fd = parse_and_open(argc, argv, desc, opts);
 	if (fd < 0)
@@ -2159,6 +2198,8 @@ static int get_feature(int argc, char **argv, struct command *cmd, struct plugin
 		OPT_FLAG("human-readable",'H', &cfg.human_readable, human_readable),
 		OPT_END()
 	};
+
+	CMD_NOT_YET_SUPPORTED();
 
 	err = fd = parse_and_open(argc, argv, desc, opts);
 	if (fd < 0)
@@ -2453,6 +2494,8 @@ static int subsystem_reset(int argc, char **argv, struct command *cmd, struct pl
 		OPT_END()
 	};
 
+	CMD_NOT_YET_SUPPORTED();
+
 	err = fd = parse_and_open(argc, argv, desc, opts);
 	if (fd < 0)
 		goto ret;
@@ -2480,6 +2523,8 @@ static int reset(int argc, char **argv, struct command *cmd, struct plugin *plug
 		OPT_END()
 	};
 
+	CMD_NOT_YET_SUPPORTED();
+
 	err = fd = parse_and_open(argc, argv, desc, opts);
 	if (fd < 0)
 		goto ret;
@@ -2501,6 +2546,8 @@ static int ns_rescan(int argc, char **argv, struct command *cmd, struct plugin *
 	OPT_ARGS(opts) = {
 		OPT_END()
 	};
+
+	CMD_NOT_YET_SUPPORTED();
 
 	err = fd = parse_and_open(argc, argv, desc, opts);
 	if (fd < 0)
@@ -2554,6 +2601,8 @@ static int sanitize(int argc, char **argv, struct command *cmd, struct plugin *p
 		OPT_UINT("ovrpat",     'p', &cfg.ovrpat,     ovrpat_desc),
 		OPT_END()
 	};
+
+	CMD_NOT_YET_SUPPORTED();
 
 	ret = fd = parse_and_open(argc, argv, desc, opts);
 	if (fd < 0)
@@ -2634,6 +2683,8 @@ static int show_registers(int argc, char **argv, struct command *cmd, struct plu
 		OPT_END()
 	};
 
+	CMD_NOT_YET_SUPPORTED();
+
 	err = fd = parse_and_open(argc, argv, desc, opts);
 	if (fd < 0)
 		goto ret;
@@ -2692,6 +2743,8 @@ static int get_property(int argc, char **argv, struct command *cmd, struct plugi
 		OPT_END()
 	};
 
+	CMD_NOT_YET_SUPPORTED();
+
 	err = fd = parse_and_open(argc, argv, desc, opts);
 	if (fd < 0)
 		goto ret;
@@ -2740,6 +2793,8 @@ static int set_property(int argc, char **argv, struct command *cmd, struct plugi
 		OPT_UINT("value",  'v', &cfg.value,  value),
 		OPT_END()
 	};
+
+	CMD_NOT_YET_SUPPORTED();
 
 	err = fd = parse_and_open(argc, argv, desc, opts);
 	if (fd < 0)
@@ -3037,6 +3092,8 @@ static int set_feature(int argc, char **argv, struct command *cmd, struct plugin
 		OPT_END()
 	};
 
+	CMD_NOT_YET_SUPPORTED();
+
 	err = fd = parse_and_open(argc, argv, desc, opts);
 	if (fd < 0)
 		goto ret;
@@ -3149,6 +3206,8 @@ static int sec_send(int argc, char **argv, struct command *cmd, struct plugin *p
 		OPT_END()
 	};
 
+	CMD_NOT_YET_SUPPORTED();
+
 	err = fd = parse_and_open(argc, argv, desc, opts);
 	if (fd < 0)
 		goto ret;
@@ -3256,6 +3315,8 @@ static int dir_send(int argc, char **argv, struct command *cmd, struct plugin *p
 		OPT_FLAG("raw-binary",    'b', &cfg.raw_binary,     raw),
 		OPT_END()
 	};
+
+	CMD_NOT_YET_SUPPORTED();
 
 	err = fd = parse_and_open(argc, argv, desc, opts);
 	if (fd < 0)
@@ -3556,6 +3617,8 @@ static int dsm(int argc, char **argv, struct command *cmd, struct plugin *plugin
 		OPT_END()
 	};
 
+	CMD_NOT_YET_SUPPORTED();
+
 	err = fd = parse_and_open(argc, argv, desc, opts);
 	if (fd < 0)
 		goto ret;
@@ -3624,6 +3687,8 @@ static int flush(int argc, char **argv, struct command *cmd, struct plugin *plug
 		OPT_END()
 	};
 
+	CMD_NOT_YET_SUPPORTED();
+
 	err = fd = parse_and_open(argc, argv, desc, opts);
 	if (fd < 0)
 		goto ret;
@@ -3691,6 +3756,8 @@ static int resv_acquire(int argc, char **argv, struct command *cmd, struct plugi
 		OPT_FLAG("iekey",        'i', &cfg.iekey,        iekey),
 		OPT_END()
 	};
+
+	CMD_NOT_YET_SUPPORTED();
 
 	err = fd = parse_and_open(argc, argv, desc, opts);
 	if (fd < 0)
@@ -3763,6 +3830,8 @@ static int resv_register(int argc, char **argv, struct command *cmd, struct plug
 		OPT_FLAG("iekey",        'i', &cfg.iekey,        iekey),
 		OPT_END()
 	};
+
+	CMD_NOT_YET_SUPPORTED();
 
 	err = fd = parse_and_open(argc, argv, desc, opts);
 	if (fd < 0)
@@ -3844,6 +3913,8 @@ static int resv_release(int argc, char **argv, struct command *cmd, struct plugi
 		OPT_END()
 	};
 
+	CMD_NOT_YET_SUPPORTED();
+
 	err = fd = parse_and_open(argc, argv, desc, opts);
 	if (fd < 0)
 		goto ret;
@@ -3915,6 +3986,8 @@ static int resv_report(int argc, char **argv, struct command *cmd, struct plugin
 		OPT_FLAG("raw-binary",    'b', &cfg.raw_binary,     raw),
 		OPT_END()
 	};
+
+	CMD_NOT_YET_SUPPORTED();
 
 	err = fd = parse_and_open(argc, argv, desc, opts);
 	if (fd < 0)
@@ -4223,6 +4296,9 @@ static int compare(int argc, char **argv, struct command *cmd, struct plugin *pl
 	const char *desc = "Compare specified logical blocks on "\
 		"device with specified data buffer; return failure if buffer "\
 		"and block(s) are dissimilar";
+
+	CMD_NOT_YET_SUPPORTED();
+
 	return submit_io(nvme_cmd_compare, "compare", desc, argc, argv);
 }
 
@@ -4230,6 +4306,9 @@ static int read_cmd(int argc, char **argv, struct command *cmd, struct plugin *p
 {
 	const char *desc = "Copy specified logical blocks on the given "\
 		"device to specified data buffer (default buffer is stdout).";
+
+	CMD_NOT_YET_SUPPORTED();
+
 	return submit_io(nvme_cmd_read, "read", desc, argc, argv);
 }
 
@@ -4238,6 +4317,9 @@ static int write_cmd(int argc, char **argv, struct command *cmd, struct plugin *
 	const char *desc = "Copy from provided data buffer (default "\
 		"buffer is stdin) to specified logical blocks on the given "\
 		"device.";
+
+	CMD_NOT_YET_SUPPORTED();
+
 	return submit_io(nvme_cmd_write, "write", desc, argc, argv);
 }
 
@@ -4292,6 +4374,8 @@ static int verify_cmd(int argc, char **argv, struct command *cmd, struct plugin 
 		OPT_SHRT("app-tag-mask",      'm', &cfg.app_tag_mask,      app_tag_mask),
 		OPT_END()
 	};
+
+	CMD_NOT_YET_SUPPORTED();
 
 	err = fd = parse_and_open(argc, argv, desc, opts);
 	if (fd < 0)
@@ -4378,6 +4462,8 @@ static int sec_recv(int argc, char **argv, struct command *cmd, struct plugin *p
 		OPT_END()
 	};
 
+	CMD_NOT_YET_SUPPORTED();
+
 	err = fd = parse_and_open(argc, argv, desc, opts);
 	if (fd < 0)
 		goto ret;
@@ -4458,6 +4544,8 @@ static int get_lba_status(int argc, char **argv, struct command *cmd,
 		OPT_FMT("output-format", 'o', &cfg.output_format, output_format),
 		OPT_END()
 	};
+
+	CMD_NOT_YET_SUPPORTED();
 
 	err = fd = parse_and_open(argc, argv, desc, opts);
 	if (fd < 0)
@@ -4545,6 +4633,8 @@ static int dir_receive(int argc, char **argv, struct command *cmd, struct plugin
 		OPT_FLAG("human-readable",'H', &cfg.human_readable, human_readable),
 		OPT_END()
 	};
+
+	CMD_NOT_YET_SUPPORTED();
 
 	err = fd = parse_and_open(argc, argv, desc, opts);
 	if (fd < 0)
@@ -4849,7 +4939,7 @@ static int gen_hostnqn_cmd(int argc, char **argv, struct command *command, struc
 {
 	uuid_t uuid;
 	char uuid_str[37]; /* e.g. 1b4e28ba-2fa1-11d2-883f-0016d3cca427 + \0 */
-
+	CMD_NOT_YET_SUPPORTED();
 	uuid_generate_random(uuid);
 	uuid_unparse_lower(uuid, uuid_str);
 	printf("nqn.2014-08.org.nvmexpress:uuid:%s\n", uuid_str);
@@ -4858,6 +4948,7 @@ static int gen_hostnqn_cmd(int argc, char **argv, struct command *command, struc
 #else
 static int gen_hostnqn_cmd(int argc, char **argv, struct command *command, struct plugin *plugin)
 {
+	CMD_NOT_YET_SUPPORTED();
 	fprintf(stderr, "\"%s\" not supported. Install lib uuid and rebuild.\n",
 		command->name);
 	return -ENOTSUP;
@@ -4867,6 +4958,8 @@ static int gen_hostnqn_cmd(int argc, char **argv, struct command *command, struc
 static int show_hostnqn_cmd(int argc, char **argv, struct command *command, struct plugin *plugin)
 {
 	char *hostnqn;
+
+	CMD_NOT_YET_SUPPORTED();
 
 	hostnqn = hostnqn_read();
 	if (hostnqn) {
@@ -4882,30 +4975,39 @@ static int show_hostnqn_cmd(int argc, char **argv, struct command *command, stru
 static int discover_cmd(int argc, char **argv, struct command *command, struct plugin *plugin)
 {
 	const char *desc = "Send Get Log Page request to Discovery Controller.";
+
+	CMD_NOT_YET_SUPPORTED();
+
 	return fabrics_discover(desc, argc, argv, false);
 }
 
 static int connect_all_cmd(int argc, char **argv, struct command *command, struct plugin *plugin)
 {
 	const char *desc = "Discover NVMeoF subsystems and connect to them";
+
+	CMD_NOT_YET_SUPPORTED();
+
 	return fabrics_discover(desc, argc, argv, true);
 }
 
 static int connect_cmd(int argc, char **argv, struct command *command, struct plugin *plugin)
 {
 	const char *desc = "Connect to NVMeoF subsystem";
+	CMD_NOT_YET_SUPPORTED();
 	return fabrics_connect(desc, argc, argv);
 }
 
 static int disconnect_cmd(int argc, char **argv, struct command *command, struct plugin *plugin)
 {
 	const char *desc = "Disconnect from NVMeoF subsystem";
+	CMD_NOT_YET_SUPPORTED();
 	return fabrics_disconnect(desc, argc, argv);
 }
 
 static int disconnect_all_cmd(int argc, char **argv, struct command *command, struct plugin *plugin)
 {
 	const char *desc = "Disconnect from all connected NVMeoF subsystems";
+	CMD_NOT_YET_SUPPORTED();
 	return fabrics_disconnect_all(desc, argc, argv);
 }
 
