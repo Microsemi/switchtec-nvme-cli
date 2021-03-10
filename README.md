@@ -6,7 +6,7 @@ Switchtec Gen4 PAX is a variant of Microsemi's Switchtec PCIe switch product whi
 
 By default, an NVMe drive in the PAX fabric cannot be enumerated by the host. Using the bind operation provided by the Switchtec Gen4 PAX switch, such a VF can be bound to and enumerated by the host.
 
-Unlike some other SR-IOV devices such as NICs, NVMe drives need to be properly configured before they can be used. Generally, configuration includes creating an namespace and attaching the namespace to a specific VF (NVMe secondary controller). 
+Unlike some other SR-IOV devices such as NICs, NVMe drives need to be properly configured before they can be used. Generally, configuration includes creating a namespace, attaching the namespace to a specific VF (NVMe secondary controller), allocating VI and VQ resources for the VF, and bringing the VF online.
 
 The configuration is done through Fabric Manager using MRPC commands. The MRPC interface is a way for a host to send configuration commands to the Switchtec firmware. Switchtec Gen4 PAX provides a special MRPC command to forward NVMe admin commands to the NVMe drives in the PAX fabric. 
 
@@ -26,6 +26,12 @@ Swichtec-nvme-cli supports the following operations for NVMe drives behind PAX:
 - Sending the NVMe Identify Controller command
 - Sending the NVMe Identify Namespace command, displaying structure
 - Sending the NVMe Identify List command, displaying structure
+- Sending the Virtualization Management command
+- Resetting a specific Virtual Function (VF)
+- Downloading a firmware image
+- Committing a firmware image
+- Sending a user-defined Admin command
+- Listing secondary controllers
 
 ## Building and Installation
 Switchtec-nvme-cli has the following dependencies:
@@ -50,11 +56,11 @@ Here are some sample commands for managing NVMe drives in a PAX fabric. For the 
 #sudo ./switchtec-nvme switchtec list
 Node                       SN                   Model                                    Namespace Usage                      Format           FW Rev
 -------------------------- -------------------- ---------------------------------------- --------- -------------------------- ---------------- --------
-0x3300n1@/dev/switchtec0   SERIALNUMBER         VENDOR MODEL                             1           6.55  MB /   6.55  MB    512   B +  0 B   REVISION
-0x3300n2@/dev/switchtec0   SERIALNUMBER         VENDOR MODEL                             2          13.11  MB /  13.11  MB    512   B +  0 B   REVISION
-0x3300n3@/dev/switchtec0   SERIALNUMBER         VENDOR MODEL                             3         131.07  MB / 131.07  MB    512   B +  0 B   REVISION
-0x3300n4@/dev/switchtec0   SERIALNUMBER         VENDOR MODEL                             4           2.15  GB /   2.15  GB    512   B +  0 B   REVISION
-0x3300n5@/dev/switchtec0   SERIALNUMBER         VENDOR MODEL                             5           2.15  GB /   2.15  GB    512   B +  0 B   REVISION
+0x3300@/dev/switchtec0   SERIALNUMBER         VENDOR MODEL                             1           6.55  MB /   6.55  MB    512   B +  0 B   REVISION
+0x3300@/dev/switchtec0   SERIALNUMBER         VENDOR MODEL                             2          13.11  MB /  13.11  MB    512   B +  0 B   REVISION
+0x3300@/dev/switchtec0   SERIALNUMBER         VENDOR MODEL                             3         131.07  MB / 131.07  MB    512   B +  0 B   REVISION
+0x3300@/dev/switchtec0   SERIALNUMBER         VENDOR MODEL                             4           2.15  GB /   2.15  GB    512   B +  0 B   REVISION
+0x3300@/dev/switchtec0   SERIALNUMBER         VENDOR MODEL                             5           2.15  GB /   2.15  GB    512   B +  0 B   REVISION
 
 ```
 2. List controllers of an NVMe drive
@@ -93,7 +99,7 @@ create-ns: Success, created nsid:6
 ```
 5. Attach a namespace to a controller
 ```
-#sudo ./switchtec-nvme attach-ns 0x3300@/dev/switchtec0 -n 6 -c 0x21
+#sudo ./switchtec-nvme attach-ns 0x3300@/dev/switchtec0 -n 6 -c 1
 attach-ns: Success, nsid:6
 ```
 6. List all NVMe devices and namespaces
@@ -101,33 +107,53 @@ attach-ns: Success, nsid:6
 #sudo ./switchtec-nvme switchtec list
 Node                       SN                   Model                                    Namespace Usage                      Format           FW Rev
 -------------------------- -------------------- ---------------------------------------- --------- -------------------------- ---------------- --------
-0x3300n1@/dev/switchtec0   SERIALNUMBER         VENDOR MODEL                             1           6.55  MB /   6.55  MB    512   B +  0 B   REVISION
-0x3300n2@/dev/switchtec0   SERIALNUMBER         VENDOR MODEL                             2          13.11  MB /  13.11  MB    512   B +  0 B   REVISION
-0x3300n3@/dev/switchtec0   SERIALNUMBER         VENDOR MODEL                             3         131.07  MB / 131.07  MB    512   B +  0 B   REVISION
-0x3300n4@/dev/switchtec0   SERIALNUMBER         VENDOR MODEL                             4           2.15  GB /   2.15  GB    512   B +  0 B   REVISION
-0x3300n5@/dev/switchtec0   SERIALNUMBER         VENDOR MODEL                             5           2.15  GB /   2.15  GB    512   B +  0 B   REVISION
-0x3300n6@/dev/switchtec0   SERIALNUMBER         VENDOR MODEL                             6           4.29  GB /   4.29  GB      4 KiB +  0 B   REVISION
+0x3300@/dev/switchtec0   SERIALNUMBER         VENDOR MODEL                             1           6.55  MB /   6.55  MB    512   B +  0 B   REVISION
+0x3300@/dev/switchtec0   SERIALNUMBER         VENDOR MODEL                             2          13.11  MB /  13.11  MB    512   B +  0 B   REVISION
+0x3300@/dev/switchtec0   SERIALNUMBER         VENDOR MODEL                             3         131.07  MB / 131.07  MB    512   B +  0 B   REVISION
+0x3300@/dev/switchtec0   SERIALNUMBER         VENDOR MODEL                             4           2.15  GB /   2.15  GB    512   B +  0 B   REVISION
+0x3300@/dev/switchtec0   SERIALNUMBER         VENDOR MODEL                             5           2.15  GB /   2.15  GB    512   B +  0 B   REVISION
+0x3300@/dev/switchtec0   SERIALNUMBER         VENDOR MODEL                             6           4.29  GB /   4.29  GB      4 KiB +  0 B   REVISION
 ```
-7. Detach a namespace from a controller
+7. Allocate VQ and VI resources for the controller
+```
+#sudo ./switchtec-nvme virt-mgmt 0x3300@/dev/switchtec0 -c1 -r0 -a8 -n2
+success, Number of Resources allocated:0x2
+#sudo ./switchtec-nvme virt-mgmt 0x3300@/dev/switchtec0 -c1 -r1 -a8 -n2
+success, Number of Resources allocated:0x2
+```
+8. Reset the controller and then bring it online (note that `0x3300` is the ID for the primary controller, and `0x3301` is for the secondary controller 1)
+```
+#sudo ./switchtec-nvme switchtec vf-reset 0x3301@/dev/switchtec0 -f
+#sudo ./switchtec-nvme virt-mgmt 0x3300@/dev/switchtec0 -c1 -r1 -a9
+success, Number of Resources allocated:0
+```
+9. Now you can bind the controller to a PAX device and start using the namespace resource
+
+10. Bring the controller offline
+```
+#sudo ./switchtec-nvme virt-mgmt 0x3300@/dev/switchtec0 -c1 -r1 -a7
+success, Number of Resources allocated:0
+```
+11. Detach a namespace from a controller
 ```
 #sudo ./switchtec-nvme detach-ns 0x3300@/dev/switchtec0 -n 6 -c 0x21
 detach-ns: Success, nsid:6
 ```
-8. Delete a namespace
+12. Delete a namespace
 ```
 #sudo ./switchtec-nvme delete-ns 0x3300@/dev/switchtec0 -n 6
 delete-ns: Success, deleted nsid:6
 ```
-9. List all NVMe devices and namespaces
+13. List all NVMe devices and namespaces
 ```
 #sudo ./switchtec-nvme switchtec list
 Node                       SN                   Model                                    Namespace Usage                      Format           FW Rev
 -------------------------- -------------------- ---------------------------------------- --------- -------------------------- ---------------- --------
-0x3300n1@/dev/switchtec0   SERIALNUMBER         VENDOR MODEL                             1           6.55  MB /   6.55  MB    512   B +  0 B   REVISION
-0x3300n2@/dev/switchtec0   SERIALNUMBER         VENDOR MODEL                             2          13.11  MB /  13.11  MB    512   B +  0 B   REVISION
-0x3300n3@/dev/switchtec0   SERIALNUMBER         VENDOR MODEL                             3         131.07  MB / 131.07  MB    512   B +  0 B   REVISION
-0x3300n4@/dev/switchtec0   SERIALNUMBER         VENDOR MODEL                             4           2.15  GB /   2.15  GB    512   B +  0 B   REVISION
-0x3300n5@/dev/switchtec0   SERIALNUMBER         VENDOR MODEL                             5           2.15  GB /   2.15  GB    512   B +  0 B   REVISION
+0x3300@/dev/switchtec0   SERIALNUMBER         VENDOR MODEL                             1           6.55  MB /   6.55  MB    512   B +  0 B   REVISION
+0x3300@/dev/switchtec0   SERIALNUMBER         VENDOR MODEL                             2          13.11  MB /  13.11  MB    512   B +  0 B   REVISION
+0x3300@/dev/switchtec0   SERIALNUMBER         VENDOR MODEL                             3         131.07  MB / 131.07  MB    512   B +  0 B   REVISION
+0x3300@/dev/switchtec0   SERIALNUMBER         VENDOR MODEL                             4           2.15  GB /   2.15  GB    512   B +  0 B   REVISION
+0x3300@/dev/switchtec0   SERIALNUMBER         VENDOR MODEL                             5           2.15  GB /   2.15  GB    512   B +  0 B   REVISION
 ```
 
 ### Fabric Manager over Ethernet channel
@@ -136,11 +162,11 @@ Node                       SN                   Model                           
 #sudo ./switchtec-nvme switchtec list -r 10.188.117.80:0
 Node                       SN                   Model                                    Namespace Usage                      Format           FW Rev
 -------------------------- -------------------- ---------------------------------------- --------- -------------------------- ---------------- --------
-0x3300n1@10.188.117.80:0   SERIALNUMBER         VENDOR MODEL                             1           6.55  MB /   6.55  MB    512   B +  0 B   REVISION
-0x3300n2@10.188.117.80:0   SERIALNUMBER         VENDOR MODEL                             2          13.11  MB /  13.11  MB    512   B +  0 B   REVISION
-0x3300n3@10.188.117.80:0   SERIALNUMBER         VENDOR MODEL                             3         131.07  MB / 131.07  MB    512   B +  0 B   REVISION
-0x3300n4@10.188.117.80:0   SERIALNUMBER         VENDOR MODEL                             4           2.15  GB /   2.15  GB    512   B +  0 B   REVISION
-0x3300n5@10.188.117.80:0   SERIALNUMBER         VENDOR MODEL                             5           2.15  GB /   2.15  GB    512   B +  0 B   REVISION
+0x3300@10.188.117.80:0   SERIALNUMBER         VENDOR MODEL                             1           6.55  MB /   6.55  MB    512   B +  0 B   REVISION
+0x3300@10.188.117.80:0   SERIALNUMBER         VENDOR MODEL                             2          13.11  MB /  13.11  MB    512   B +  0 B   REVISION
+0x3300@10.188.117.80:0   SERIALNUMBER         VENDOR MODEL                             3         131.07  MB / 131.07  MB    512   B +  0 B   REVISION
+0x3300@10.188.117.80:0   SERIALNUMBER         VENDOR MODEL                             4           2.15  GB /   2.15  GB    512   B +  0 B   REVISION
+0x3300@10.188.117.80:0   SERIALNUMBER         VENDOR MODEL                             5           2.15  GB /   2.15  GB    512   B +  0 B   REVISION
 ```
 2. List controllers of an NVMe drive
 ```
@@ -186,33 +212,53 @@ attach-ns: Success, nsid:6
 #sudo ./switchtec-nvme switchtec list -r 10.188.117.80:0
 Node                       SN                   Model                                    Namespace Usage                      Format           FW Rev
 -------------------------- -------------------- ---------------------------------------- --------- -------------------------- ---------------- --------
-0x3300n1@10.188.117.80:0   SERIALNUMBER         VENDOR MODEL                             1           6.55  MB /   6.55  MB    512   B +  0 B   REVISION
-0x3300n2@10.188.117.80:0   SERIALNUMBER         VENDOR MODEL                             2          13.11  MB /  13.11  MB    512   B +  0 B   REVISION
-0x3300n3@10.188.117.80:0   SERIALNUMBER         VENDOR MODEL                             3         131.07  MB / 131.07  MB    512   B +  0 B   REVISION
-0x3300n4@10.188.117.80:0   SERIALNUMBER         VENDOR MODEL                             4           2.15  GB /   2.15  GB    512   B +  0 B   REVISION
-0x3300n5@10.188.117.80:0   SERIALNUMBER         VENDOR MODEL                             5           2.15  GB /   2.15  GB    512   B +  0 B   REVISION
-0x3300n6@10.188.117.80:0   SERIALNUMBER         VENDOR MODEL                             6           4.29  GB /   4.29  GB      4 KiB +  0 B   REVISION
+0x3300@10.188.117.80:0   SERIALNUMBER         VENDOR MODEL                             1           6.55  MB /   6.55  MB    512   B +  0 B   REVISION
+0x3300@10.188.117.80:0   SERIALNUMBER         VENDOR MODEL                             2          13.11  MB /  13.11  MB    512   B +  0 B   REVISION
+0x3300@10.188.117.80:0   SERIALNUMBER         VENDOR MODEL                             3         131.07  MB / 131.07  MB    512   B +  0 B   REVISION
+0x3300@10.188.117.80:0   SERIALNUMBER         VENDOR MODEL                             4           2.15  GB /   2.15  GB    512   B +  0 B   REVISION
+0x3300@10.188.117.80:0   SERIALNUMBER         VENDOR MODEL                             5           2.15  GB /   2.15  GB    512   B +  0 B   REVISION
+0x3300@10.188.117.80:0   SERIALNUMBER         VENDOR MODEL                             6           4.29  GB /   4.29  GB      4 KiB +  0 B   REVISION
 ```
-7. Detach a namespace from a controller
+7. Allocate VQ and VI resources for the controller
+```
+#sudo ./switchtec-nvme virt-mgmt 0x3300@10.188.117.80 -c1 -r0 -a8 -n2
+success, Number of Resources allocated:0x2
+#sudo ./switchtec-nvme virt-mgmt 0x3300@10.188.117.80 -c1 -r1 -a8 -n2
+success, Number of Resources allocated:0x2
+```
+8. Reset the controller and then bring it online (note that `0x3300` is the ID for the primary controller, and `0x3301` is for the secondary controller 1)
+```
+#sudo ./switchtec-nvme switchtec vf-reset 0x3301@10.188.117.80 -f
+#sudo ./switchtec-nvme virt-mgmt 0x3300@10.188.117.80 -c1 -r1 -a9
+success, Number of Resources allocated:0
+```
+9. Now you can bind the controller to a PAX device and start using the namespace resource
+
+10. Bring the controller offline
+```
+#sudo ./switchtec-nvme virt-mgmt 0x3300@10.188.117.80 -c1 -r1 -a7
+success, Number of Resources allocated:0
+```
+11. Detach a namespace from a controller
 ```
 #sudo ./switchtec-nvme detach-ns 0x3300@10.188.117.80:0 -n 6 -c 0x21
 detach-ns: Success, nsid:6
 ```
-8. Delete a namespace
+12. Delete a namespace
 ```
 #sudo ./switchtec-nvme delete-ns 0x3300@10.188.117.80:0 -n 6
 delete-ns: Success, deleted nsid:6
 ```
-9. List all NVMe devices and namespaces
+13. List all NVMe devices and namespaces
 ```
 #sudo ./switchtec-nvme switchtec list -r 10.188.117.80:0
 Node                       SN                   Model                                    Namespace Usage                      Format           FW Rev
 -------------------------- -------------------- ---------------------------------------- --------- -------------------------- ---------------- --------
-0x3300n1@10.188.117.80:0   SERIALNUMBER         VENDOR MODEL                             1           6.55  MB /   6.55  MB    512   B +  0 B   REVISION
-0x3300n2@10.188.117.80:0   SERIALNUMBER         VENDOR MODEL                             2          13.11  MB /  13.11  MB    512   B +  0 B   REVISION
-0x3300n3@10.188.117.80:0   SERIALNUMBER         VENDOR MODEL                             3         131.07  MB / 131.07  MB    512   B +  0 B   REVISION
-0x3300n4@10.188.117.80:0   SERIALNUMBER         VENDOR MODEL                             4           2.15  GB /   2.15  GB    512   B +  0 B   REVISION
-0x3300n5@10.188.117.80:0   SERIALNUMBER         VENDOR MODEL                             5           2.15  GB /   2.15  GB    512   B +  0 B   REVISION
+0x3300@10.188.117.80:0   SERIALNUMBER         VENDOR MODEL                             1           6.55  MB /   6.55  MB    512   B +  0 B   REVISION
+0x3300@10.188.117.80:0   SERIALNUMBER         VENDOR MODEL                             2          13.11  MB /  13.11  MB    512   B +  0 B   REVISION
+0x3300@10.188.117.80:0   SERIALNUMBER         VENDOR MODEL                             3         131.07  MB / 131.07  MB    512   B +  0 B   REVISION
+0x3300@10.188.117.80:0   SERIALNUMBER         VENDOR MODEL                             4           2.15  GB /   2.15  GB    512   B +  0 B   REVISION
+0x3300@10.188.117.80:0   SERIALNUMBER         VENDOR MODEL                             5           2.15  GB /   2.15  GB    512   B +  0 B   REVISION
 ```
 
 [0]: https://github.com/linux-nvme/nvme-cli
