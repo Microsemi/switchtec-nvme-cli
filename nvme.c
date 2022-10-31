@@ -225,7 +225,7 @@ int open_global_device(char *dev)
 
 		return fd;
 	}
-	
+
 	err = -1;
 perror:
 	perror(dev);
@@ -346,7 +346,7 @@ static int get_smart_log(int argc, char **argv, struct command *cmd, struct plug
 		OPT_END()
 	};
 
-	CMD_NOT_YET_SUPPORTED();
+	// CMD_NOT_YET_SUPPORTED();
 
 	err = fd = parse_and_open(argc, argv, desc, opts);
 	if (fd < 0)
@@ -476,7 +476,7 @@ static int get_telemetry_log(int argc, char **argv, struct command *cmd, struct 
 		OPT_END()
 	};
 
-	CMD_NOT_YET_SUPPORTED();
+//	CMD_NOT_YET_SUPPORTED();
 
 	err = fd = parse_and_open(argc, argv, desc, opts);
 	if (fd < 0)
@@ -704,7 +704,7 @@ static int get_error_log(int argc, char **argv, struct command *cmd, struct plug
 		OPT_END()
 	};
 
-	CMD_NOT_YET_SUPPORTED();
+	// CMD_NOT_YET_SUPPORTED();
 
 	err = fd = parse_and_open(argc, argv, desc, opts);
 	if (fd < 0)
@@ -778,7 +778,7 @@ static int get_fw_log(int argc, char **argv, struct command *cmd, struct plugin 
 		OPT_END()
 	};
 
-	CMD_NOT_YET_SUPPORTED();
+	// CMD_NOT_YET_SUPPORTED();
 
 	err = fd = parse_and_open(argc, argv, desc, opts);
 	if (fd < 0)
@@ -2523,7 +2523,7 @@ static int reset(int argc, char **argv, struct command *cmd, struct plugin *plug
 		OPT_END()
 	};
 
-	CMD_NOT_YET_SUPPORTED();
+	// CMD_NOT_YET_SUPPORTED();
 
 	err = fd = parse_and_open(argc, argv, desc, opts);
 	if (fd < 0)
