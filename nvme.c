@@ -2295,7 +2295,7 @@ static int fw_download(int argc, char **argv, struct command *cmd, struct plugin
 		"Submission Queues. Activate downloaded firmware with "\
 		"fw-activate, and then reset the device to apply the downloaded firmware.";
 	const char *fw = "firmware file (required)";
-	const char *xfer = "transfer chunksize limit";
+	const char *xfer = "transfer chunksize limit, default 512";
 	const char *offset = "starting dword offset, default 0";
 	int err, fd, fw_fd = -1;
 	unsigned int fw_size;
@@ -2311,7 +2311,7 @@ static int fw_download(int argc, char **argv, struct command *cmd, struct plugin
 
 	struct config cfg = {
 		.fw     = "",
-		.xfer   = 4096,
+		.xfer   = 512,
 		.offset = 0,
 	};
 
@@ -2325,6 +2325,12 @@ static int fw_download(int argc, char **argv, struct command *cmd, struct plugin
 	err = fd = parse_and_open(argc, argv, desc, opts);
 	if (fd < 0)
 		goto ret;
+
+	if (!cfg.xfer) {
+		fprintf(stderr, "Transfer chunksize limit cannot be zero\n");
+		err = -EINVAL;
+		goto ret;
+        }
 
 	fw_fd = open(cfg.fw, O_RDONLY);
 	cfg.offset <<= 2;
@@ -2357,7 +2363,6 @@ static int fw_download(int argc, char **argv, struct command *cmd, struct plugin
 
 	buf = fw_buf;
 
-	cfg.xfer = 512;
 	if (read(fw_fd, fw_buf, fw_size) != ((ssize_t)(fw_size))) {
 		err = -errno;
 		fprintf(stderr, "read :%s :%s\n", cfg.fw, strerror(errno));
